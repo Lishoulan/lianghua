@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
-sys.path.insert(0, str(Path(__file__).parent.parent / "pip_libs"))
 
 import cvxpy as cp
 
@@ -15,7 +14,7 @@ class CostAwarePortfolioOptimizer:
                  risk_aversion=0.5, cost_aversion=1.0, max_weight=0.25,
                  min_weight=0.0, total_max_weight=0.75,
                  impact_coefficient=0.4, spread_half=0.001,
-                 total_capital=10000000):
+                 total_capital=10000000, use_dynamic_spread=True):
         self.n_scenarios = n_scenarios
         self.block_size = block_size
         self.lookback_days = lookback_days
@@ -27,6 +26,8 @@ class CostAwarePortfolioOptimizer:
         self.impact_coefficient = impact_coefficient
         self.spread_half = spread_half
         self.total_capital = total_capital
+        self.use_dynamic_spread = use_dynamic_spread
+        self._dynamic_spreads = {}
 
     def _find_similar_days(self, oamv_state_df, current_date, n_days=200):
         if current_date not in oamv_state_df.index:
@@ -85,8 +86,16 @@ class CostAwarePortfolioOptimizer:
                 volatilities[code] = 0.02
         return volumes, volatilities
 
+    def set_dynamic_spreads(self, spread_dict):
+        self._dynamic_spreads = spread_dict
+
+    def _get_spread_half(self, code):
+        if self.use_dynamic_spread and code in self._dynamic_spreads:
+            return self._dynamic_spreads[code]
+        return self.spread_half
+
     def _cost_aware_optimize(self, expected_returns, cov_matrix, daily_volumes,
-                              volatilities, candidate_codes):
+                              volatilities, candidate_codes, industry_map=None):
         n = len(candidate_codes)
         if n == 0:
             return np.array([])
@@ -104,7 +113,8 @@ class CostAwarePortfolioOptimizer:
             vol_i = volatilities.get(code, 0.02)
             daily_vol_i = daily_volumes.get(code, 1e8)
             eta_i = self.impact_coefficient * vol_i
-            cost_i = eta_i * w[i] * cp.sqrt(w[i] * self.total_capital / daily_vol_i) + self.spread_half * w[i]
+            spread_i = self._get_spread_half(code)
+            cost_i = eta_i * w[i] * cp.sqrt(w[i] * self.total_capital / daily_vol_i) + spread_i * w[i]
             cost_term += cost_i
 
         objective = cp.Maximize(
@@ -116,6 +126,20 @@ class CostAwarePortfolioOptimizer:
             w <= self.max_weight,
             cp.sum(w) <= self.total_max_weight,
         ]
+
+        if industry_map:
+            industry_groups = {}
+            for i, code in enumerate(candidate_codes):
+                ind = industry_map.get(code, 'unknown')
+                if ind not in industry_groups:
+                    industry_groups[ind] = []
+                industry_groups[ind].append(i)
+
+            for ind_name, indices in industry_groups.items():
+                if len(indices) > 1:
+                    constraints.append(
+                        cp.sum(w[indices]) <= 0.4
+                    )
 
         prob = cp.Problem(objective, constraints)
         try:
@@ -136,7 +160,7 @@ class CostAwarePortfolioOptimizer:
         return equal_w
 
     def optimize(self, candidate_codes, all_stock_data, oamv_state_df,
-                 current_date, ml_probs):
+                 current_date, ml_probs, industry_map=None):
         if len(candidate_codes) == 0:
             return np.array([]), candidate_codes
 
@@ -196,7 +220,8 @@ class CostAwarePortfolioOptimizer:
         )
 
         weights = self._cost_aware_optimize(
-            expected_returns, cov_matrix, daily_volumes, volatilities, valid_codes
+            expected_returns, cov_matrix, daily_volumes, volatilities, valid_codes,
+            industry_map=industry_map
         )
         return weights, valid_codes
 

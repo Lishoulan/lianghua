@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
-sys.path.insert(0, str(Path(__file__).parent.parent / "pip_libs"))
 
 
 class DisagreementFeatureBuilder:
@@ -100,7 +99,10 @@ class DisagreementFeatureBuilder:
     def build_features(self, df, j_col='j_raw', yellow_col='yellow_line',
                        vol_ratio_col='vol_ratio_20', window=20):
         df = self.compute_temd(df, j_col, yellow_col)
-        df = self.compute_pwvc(df, vol_ratio_col, window)
+        # 注意：不再调用 compute_pwvc，因为 pwvc 现在在 feature_engine.py 中计算
+        # 但我们保留 pwvc_distribution 的计算，但使用 feature_engine.py 中的 pwvc
+        if 'pwvc' not in df.columns:
+            df = self.compute_pwvc(df, vol_ratio_col, window)
 
         df['pwvc_distribution'] = 0
         df.loc[df['pwvc'] > 1.5, 'pwvc_distribution'] = -1

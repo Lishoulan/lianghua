@@ -9,14 +9,13 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List
 
-# Disable proxies
 os.environ['HTTP_PROXY'] = ''
 os.environ['HTTPS_PROXY'] = ''
 os.environ['http_proxy'] = ''
 os.environ['https_proxy'] = ''
 
-sys.path.insert(0, str(Path(__file__).parent / "pip_libs"))
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path = [p for p in sys.path if not p.endswith('pip_libs')]
 
 import numpy as np
 import pandas as pd
@@ -34,17 +33,24 @@ from ml_strategy.ssa_denoiser import SSADenoiser
 from ml_strategy.chebykan_predictor import ChebyKANTrainer
 from ml_strategy.drift_detector import ADDMDriftDetector
 from ml_strategy.rade_ensemble import RADEEnsemble
-from ml_strategy.portfolio_optimizer import BootstrappedMVO
+from ml_strategy.sterile_cleaner import SterileDataCleaner
+from ml_strategy.disagreement_features import DisagreementFeatureBuilder
+from ml_strategy.cost_aware_optimizer import CostAwarePortfolioOptimizer
+from ml_strategy.path_signature import PathSignatureBuilder
+from ml_strategy.llm_analyzer import LLMStockAnalyzer
 
-load_dotenv(Path(__file__).parent / ".env")
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 
 TUSHARE_TOKEN = os.getenv('TUSHARE_TOKEN')
-SERVERCHAN_KEY = os.getenv('SERVERCHAN_KEY', '')
+SERVERCHAN_KEYS = [k.strip() for k in os.getenv('SERVERCHAN_KEY', '').split(',') if k.strip()]
 
 pro = None
 if TUSHARE_TOKEN:
     try:
         pro = ts.pro_api(TUSHARE_TOKEN)
+        ts.set_token(TUSHARE_TOKEN)
+        pro = ts.pro_api(timeout=120)
     except Exception:
         pass
 
@@ -70,12 +76,131 @@ SPREAD_HALF = 0.001
 MAX_SLIPPAGE_PCT = 2.0
 INITIAL_CASH = 500000
 
+PWVC_VETO_THRESHOLD = 0.8
+J_OVERSOLD_THRESHOLD = 13
+
+PORTFOLIO_DIR = Path(__file__).parent / "portfolio_state"
+PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
+PORTFOLIO_FILE = PORTFOLIO_DIR / "portfolio.json"
+TRADE_LOG_FILE = PORTFOLIO_DIR / "trade_log.json"
+
 
 def is_st_stock(name: str) -> bool:
     for kw in ['ST', '*ST', 'S*ST', 'SST']:
         if name.startswith(kw):
             return True
     return False
+
+
+class ScanPortfolio:
+    def __init__(self, initial_cash=INITIAL_CASH):
+        self.initial_cash = initial_cash
+        self.cash = initial_cash
+        self.positions: Dict = {}
+        self.trade_history: List[Dict] = []
+        self.recent_sells: Dict[str, str] = {}
+
+    def save(self):
+        data = {
+            'initial_cash': self.initial_cash,
+            'cash': self.cash,
+            'positions': self.positions,
+            'trade_history': self.trade_history,
+            'recent_sells': self.recent_sells,
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        with open(PORTFOLIO_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+
+    @classmethod
+    def load(cls) -> 'ScanPortfolio':
+        if not PORTFOLIO_FILE.exists():
+            return cls()
+        try:
+            with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            portfolio = cls(data.get('initial_cash', INITIAL_CASH))
+            portfolio.cash = data.get('cash', portfolio.initial_cash)
+            portfolio.positions = data.get('positions', {})
+            portfolio.trade_history = data.get('trade_history', [])
+            portfolio.recent_sells = data.get('recent_sells', {})
+            return portfolio
+        except Exception:
+            return cls()
+
+    def get_position_count(self) -> int:
+        return len(self.positions)
+
+    def can_buy(self) -> bool:
+        return self.get_position_count() < MAX_PORTFOLIO_STOCKS and self.cash > 1000
+
+    def get_available_slots(self) -> int:
+        return MAX_PORTFOLIO_STOCKS - self.get_position_count()
+
+    def get_total_value(self, current_prices: Dict[str, float]) -> float:
+        total = self.cash
+        for ts_code, pos in self.positions.items():
+            price = current_prices.get(ts_code, pos.get('entry_price', 0))
+            total += pos.get('shares', 0) * price
+        return total
+
+    def add_position(self, ts_code, name, price, prob, atr, date_str,
+                     mvo_weight=None, impact_slippage=SLIPPAGE_RATE):
+        target_value = self.initial_cash * POSITION_SIZE_PCT
+        target_value = min(target_value, self.cash * 0.9)
+        shares = int(target_value / price / 100) * 100
+        if shares <= 0:
+            return False
+        amount = shares * price
+        commission = max(amount * COMMISSION_RATE, 5.0)
+        slippage = amount * impact_slippage
+        total_cost = amount + commission + slippage
+        if total_cost > self.cash:
+            return False
+        self.cash -= total_cost
+        self.positions[ts_code] = {
+            'name': name,
+            'entry_date': date_str,
+            'entry_price': float(price),
+            'shares': shares,
+            'entry_prob': float(prob),
+            'entry_atr': float(atr),
+            'peak_price': float(price),
+            'mvo_weight': float(mvo_weight) if mvo_weight is not None else None,
+        }
+        return True
+
+    def remove_position(self, ts_code, price, date_str, reason=''):
+        if ts_code not in self.positions:
+            return None
+        pos = self.positions[ts_code]
+        amount = pos['shares'] * price
+        commission = max(amount * COMMISSION_RATE, 5.0)
+        stamp_duty = amount * STAMP_DUTY_RATE
+        slippage = amount * SLIPPAGE_RATE
+        net_proceeds = amount - commission - stamp_duty - slippage
+        self.cash += net_proceeds
+        profit_pct = (price - pos['entry_price']) / pos['entry_price'] * 100
+        profit_abs = pos['shares'] * (price - pos['entry_price'])
+        hold_days = (pd.Timestamp(date_str) - pd.Timestamp(pos['entry_date'])).days
+        trade_record = {
+            'code': ts_code,
+            'name': pos['name'],
+            'entry_date': pos['entry_date'],
+            'exit_date': date_str,
+            'entry_price': pos['entry_price'],
+            'exit_price': float(price),
+            'shares': pos['shares'],
+            'profit_pct': float(profit_pct),
+            'profit_abs': float(profit_abs),
+            'hold_days': hold_days,
+            'exit_reason': reason,
+            'entry_prob': pos['entry_prob'],
+        }
+        self.trade_history.append(trade_record)
+        self.recent_sells[ts_code] = date_str
+        del self.positions[ts_code]
+        return trade_record
 
 
 def get_index_daily(ts_code='000001.SH', start_date='20210101', end_date='20260520'):
@@ -238,32 +363,103 @@ INDUSTRY_ETF_FALLBACK = {
 
 
 def send_serverchan(title, desp):
-    if not SERVERCHAN_KEY:
-        print("SERVERCHAN_KEY not configured, skipping push")
+    if not SERVERCHAN_KEYS:
+        print("SERVERCHAN_KEY未配置，跳过推送")
         return False
-    url = f"https://sctapi.ftqq.com/{SERVERCHAN_KEY}.send"
-    data = {"title": title, "desp": desp}
-    try:
-        resp = requests.post(url, data=data, timeout=10)
-        if resp.status_code == 200:
-            result = resp.json()
-            if result.get('code') == 0:
-                print("Server酱推送成功")
-                return True
+    all_ok = True
+    for idx, key in enumerate(SERVERCHAN_KEYS):
+        url = f"https://sctapi.ftqq.com/{key}.send"
+        data = {"title": title, "desp": desp}
+        label = f"Key#{idx+1}" if len(SERVERCHAN_KEYS) > 1 else ""
+        try:
+            resp = requests.post(url, data=data, timeout=10)
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get('code') == 0:
+                    print(f"Server酱推送成功 {label}".strip())
+                else:
+                    print(f"Server酱推送失败 {label}: {result}")
+                    all_ok = False
             else:
-                print(f"Server酱推送失败: {result}")
-        else:
-            print(f"Server酱HTTP错误: {resp.status_code}")
-    except Exception as e:
-        print(f"Server酱推送异常: {e}")
-    return False
+                print(f"Server酱HTTP错误 {label}: {resp.status_code}")
+                all_ok = False
+        except Exception as e:
+            print(f"Server酱推送异常 {label}: {e}")
+            all_ok = False
+    return all_ok
 
 
-def run_daily_scan():
+def fetch_stock_news(ts_code, max_items=5):
+    try:
+        import akshare as ak
+        symbol = ts_code.split('.')[0]
+        news_df = ak.stock_news_em(symbol=symbol)
+        if news_df is not None and len(news_df) > 0:
+            titles = news_df['新闻标题'].tolist()[:max_items] if '新闻标题' in news_df.columns else []
+            if not titles and '标题' in news_df.columns:
+                titles = news_df['标题'].tolist()[:max_items]
+            return titles
+    except Exception:
+        pass
+    return []
+
+
+def check_sell_conditions(ts_code, pos, df, last_date, oamv_daily, market_state):
+    if last_date not in df.index:
+        return None, 0, 0
+    row = df.loc[last_date]
+    current_price = float(row['Close'])
+    entry_price = pos.get('entry_price', 0)
+    peak_price = pos.get('peak_price', entry_price)
+
+    if current_price > peak_price:
+        pos['peak_price'] = current_price
+        peak_price = current_price
+
+    profit_pct = (current_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+    dd_pct = (peak_price - current_price) / peak_price * 100 if peak_price > 0 else 0
+    hold_days = (pd.Timestamp(last_date) - pd.Timestamp(pos.get('entry_date', last_date))).days
+
+    sell_reason = None
+
+    if market_state == 'panic':
+        sell_reason = '熔断器触发'
+    elif not oamv_daily:
+        sell_reason = '0AMV日线BEAR'
+
+    if sell_reason is None and hold_days >= MIN_HOLD_DAYS:
+        yellow_line = row.get('yellow_line')
+        if yellow_line is not None and not pd.isna(yellow_line):
+            if current_price < yellow_line:
+                sell_reason = f'收盘<{yellow_line:.2f}(黄线)'
+
+        if sell_reason is None and dd_pct >= TRAILING_STOP_PCT:
+            sell_reason = f'峰值回撤{dd_pct:.1f}%≥{TRAILING_STOP_PCT}%'
+
+        if sell_reason is None:
+            entry_atr = pos.get('entry_atr', 0)
+            if entry_atr > 0 and peak_price > entry_price:
+                dd_atr = (peak_price - current_price) / entry_atr
+                if dd_atr >= ATR_STOP_MULT:
+                    sell_reason = f'ATR止损{dd_atr:.1f}x≥{ATR_STOP_MULT}x'
+
+    return sell_reason, profit_pct, dd_pct
+
+
+def run_daily_scan(mode='afternoon'):
     today = datetime.now().strftime('%Y%m%d')
     today_display = datetime.now().strftime('%Y-%m-%d')
 
-    print(f"[{today_display}] v7.1 每日扫描启动...")
+    mode_label = {'morning': '早盘', 'afternoon': '尾盘', 'evening': '盘后'}.get(mode, mode)
+    print(f"[{today_display}] v9.1 {mode_label}模式 每日扫描 + 带盘推送 启动...")
+
+    portfolio = ScanPortfolio.load()
+    print(f"  初始资金: {portfolio.initial_cash:,.0f}")
+    print(f"  当前现金: {portfolio.cash:,.2f}")
+    print(f"  当前持仓: {portfolio.get_position_count()}/{MAX_PORTFOLIO_STOCKS}")
+    if portfolio.positions:
+        for code, pos in portfolio.positions.items():
+            print(f"    {code} {pos['name']}: {pos['shares']}股 @ {pos['entry_price']:.2f}")
 
     print("加载行业数据...")
     industry_j_cache = {}
@@ -290,9 +486,16 @@ def run_daily_scan():
     print(f"  行业: {len(industry_j_cache)}")
 
     ssa_denoiser = SSADenoiser(window_length=10, n_signal_groups=2)
-    portfolio_optimizer = BootstrappedMVO(
+    sig_builder = PathSignatureBuilder(truncation_level=2, path_dims=3, path_length=5, lead_lag=False)
+    sterile_cleaner = SterileDataCleaner()
+    disagreement_builder = DisagreementFeatureBuilder(ssa_window=10, ssa_signal_groups=2)
+
+    portfolio_optimizer = CostAwarePortfolioOptimizer(
         n_scenarios=500, block_size=5, lookback_days=200,
-        risk_aversion=0.5, max_weight=0.25, min_weight=0.0, total_max_weight=0.75
+        risk_aversion=0.5, cost_aversion=0.5, max_weight=0.25,
+        min_weight=0.0, total_max_weight=0.75,
+        impact_coefficient=0.4, spread_half=0.001,
+        total_capital=portfolio.initial_cash
     )
     drift_detector = ADDMDriftDetector(ar_order=3, ph_threshold=2.0, ph_delta=0.01, use_vol_filter=True)
 
@@ -310,6 +513,7 @@ def run_daily_scan():
     if index_df is None:
         return
     index_df = compute_indicators(index_df)
+    market_vol = 0.02
     if 'ATR14' in index_df.columns and len(index_df) > 0:
         market_atr = float(index_df['ATR14'].iloc[-1])
         market_close = float(index_df['Close'].iloc[-1])
@@ -337,10 +541,13 @@ def run_daily_scan():
             if df is None:
                 continue
             all_stock_data[ts_code] = {'data': df, 'name': name, 'industry': industry}
-            featured_df = discretizer.transform(df)
+            feature_df_raw = sterile_cleaner.get_feature_dataframe(df, ts_code)
+            featured_df = discretizer.transform(feature_df_raw)
             ind_j = industry_j_cache.get(industry)
             featured_df = discretizer.add_market_context(featured_df, index_df, None, ind_j)
+            featured_df = disagreement_builder.build_features(featured_df)
             featured_df = ssa_denoiser.denoise_features(featured_df)
+            featured_df = discretizer.add_path_signatures(featured_df, sig_builder)
             all_featured_data[ts_code] = featured_df
         except Exception:
             continue
@@ -436,9 +643,11 @@ def run_daily_scan():
     oamv_state_df = oamv_filter.get_state_df()
 
     last_date = index_df.index[-1]
+    date_str = last_date.strftime('%Y-%m-%d')
     oamv_daily = oamv_filter.is_trading_allowed(last_date, require_weekly=False)
     oamv_weekly = oamv_filter.is_trading_allowed(last_date, require_weekly=True)
-    is_panic = panic_breaker.is_panic(last_date)
+    market_state = panic_breaker.get_market_state(last_date)
+    is_panic = market_state == 'panic'
 
     oamv_x = 0.0
     if last_date in oamv_state_df.index:
@@ -451,124 +660,423 @@ def run_daily_scan():
         if prev_close > 0:
             index_change = (index_close - prev_close) / prev_close * 100
 
+    # ========== Step 1: 检查持仓卖出条件 ==========
+    print("\n[Step 1] 持仓风控检查...")
+    sell_signals = []
+    holding_status = []
+
+    for ts_code in list(portfolio.positions.keys()):
+        pos = portfolio.positions[ts_code]
+        if ts_code not in all_stock_data:
+            holding_status.append({
+                'ts_code': ts_code, 'name': pos['name'],
+                'current_price': pos['entry_price'], 'entry_price': pos['entry_price'],
+                'profit_pct': 0, 'dd_pct': 0, 'hold_days': 0,
+                'status': '⚠️ 数据缺失', 'action': '持有',
+            })
+            continue
+        df = all_stock_data[ts_code]['data']
+        sell_reason, profit_pct, dd_pct = check_sell_conditions(
+            ts_code, pos, df, last_date, oamv_daily, market_state)
+        current_price = float(df.loc[last_date, 'Close']) if last_date in df.index else pos['entry_price']
+        hold_days = (pd.Timestamp(date_str) - pd.Timestamp(pos.get('entry_date', date_str))).days
+
+        if sell_reason:
+            sell_signals.append({
+                'ts_code': ts_code, 'name': pos['name'],
+                'price': current_price, 'reason': sell_reason,
+                'profit_pct': profit_pct, 'hold_days': hold_days,
+                'entry_price': pos['entry_price'],
+            })
+            holding_status.append({
+                'ts_code': ts_code, 'name': pos['name'],
+                'current_price': current_price, 'entry_price': pos['entry_price'],
+                'profit_pct': profit_pct, 'dd_pct': dd_pct, 'hold_days': hold_days,
+                'status': f'🔴 {sell_reason}', 'action': '卖出',
+            })
+        else:
+            status_icon = '🟢'
+            action = '持有'
+            if dd_pct >= TRAILING_STOP_PCT * 0.6:
+                status_icon = '🟡'
+                action = '关注'
+            holding_status.append({
+                'ts_code': ts_code, 'name': pos['name'],
+                'current_price': current_price, 'entry_price': pos['entry_price'],
+                'profit_pct': profit_pct, 'dd_pct': dd_pct, 'hold_days': hold_days,
+                'status': f'{status_icon} 正常', 'action': action,
+            })
+
+    # ========== Step 2: 执行卖出 ==========
+    print(f"[Step 2] 执行卖出 ({len(sell_signals)} 只)...")
+    for sig in sell_signals:
+        trade = portfolio.remove_position(sig['ts_code'], sig['price'], date_str, sig['reason'])
+        if trade:
+            print(f"  [卖出] {sig['ts_code']} {sig['name']} @ {sig['price']:.2f} "
+                  f"收益={trade['profit_pct']:+.2f}% 原因={sig['reason']}")
+
+    # ========== Step 3: 扫描买入信号 ==========
     buy_signals = []
-    if oamv_weekly and not is_panic:
-        for ts_code, info in all_stock_data.items():
-            df = info['data']
-            featured_df = all_featured_data[ts_code]
-            if last_date not in df.index or last_date not in featured_df.index:
-                continue
-            feat_row = featured_df.loc[last_date]
-            available_cols = [c for c in feature_cols if c in feat_row.index]
-            if any(pd.isna(feat_row.get(c)) for c in available_cols):
-                continue
-            clean_data = feat_row[available_cols].to_frame().T
-            for col in ['price_zone', 'j_zone', 'k_pattern']:
-                if col in clean_data.columns:
-                    clean_data[col] = clean_data[col].astype(int)
-
-            atr_ratio = 0.02
-            if 'atr_ratio' in feat_row.index and pd.notna(feat_row['atr_ratio']):
-                atr_ratio = float(feat_row['atr_ratio'])
-
-            prob = ensemble.predict(clean_data, oamv_x_pct=oamv_x, atr_ratio=atr_ratio)[0]
-
-            if prob >= CATBOOST_BUY_THRESHOLD:
-                white_above = df.loc[last_date, 'white_above_yellow'] if 'white_above_yellow' in df.columns else True
-                if pd.notna(white_above) and not white_above:
+    if mode == 'morning':
+        print("[Step 3] 早盘模式：跳过买入扫描")
+    elif mode == 'evening':
+        print("[Step 3] 盘后模式：跳过买入扫描")
+    else:
+        print(f"[Step 3] 扫描买入信号...")
+        if oamv_weekly and market_state != 'panic' and market_state != 'warning':
+            for ts_code, info in all_stock_data.items():
+                if ts_code in portfolio.positions:
                     continue
-                amp = df.loc[last_date, 'amplitude_20'] if 'amplitude_20' in df.columns else 0
-                if pd.notna(amp) and amp > 0 and amp < FRICTION_COST_PCT * MIN_AMPLITUDE_MULT:
+                if ts_code in portfolio.recent_sells:
+                    sell_date = portfolio.recent_sells[ts_code]
+                    if (pd.Timestamp(date_str) - pd.Timestamp(sell_date)).days < COOLDOWN_DAYS:
+                        continue
+                df = info['data']
+                featured_df = all_featured_data[ts_code]
+                if last_date not in df.index or last_date not in featured_df.index:
                     continue
-                daily_vol = float(df.loc[last_date, 'amplitude_20']) / 100 if 'amplitude_20' in df.columns and pd.notna(df.loc[last_date, 'amplitude_20']) else 0.02
-                daily_vol_val = float(df.loc[last_date, 'Volume']) if 'Volume' in df.columns and pd.notna(df.loc[last_date, 'Volume']) else 0
-                order_shares = int(INITIAL_CASH * POSITION_SIZE_PCT / float(df.loc[last_date, 'Close']) / 100) * 100
-                if daily_vol_val > 0 and order_shares > 0:
-                    participation = order_shares / daily_vol_val
-                    impact_slippage = IMPACT_COEFFICIENT * daily_vol * np.sqrt(participation) + SPREAD_HALF
-                    impact_slippage = min(impact_slippage, MAX_SLIPPAGE_PCT / 100)
-                else:
-                    impact_slippage = 0.0005
-                if impact_slippage > 0.005:
+                feat_row = featured_df.loc[last_date]
+                available_cols = [c for c in feature_cols if c in feat_row.index]
+                if any(pd.isna(feat_row.get(c)) for c in available_cols):
                     continue
-                buy_signals.append({
-                    'ts_code': ts_code,
-                    'name': info['name'],
-                    'prob': prob,
-                    'price': float(df.loc[last_date, 'Close']),
-                    'atr': float(df.loc[last_date, 'ATR14']) if 'ATR14' in df.columns and not pd.isna(df.loc[last_date, 'ATR14']) else 0,
-                    'industry': info.get('industry', ''),
-                    'impact_slippage': float(impact_slippage),
-                })
+                clean_data = feat_row[available_cols].to_frame().T
+                for col in ['price_zone', 'j_zone', 'k_pattern']:
+                    if col in clean_data.columns:
+                        clean_data[col] = clean_data[col].astype(int)
 
-    buy_signals.sort(key=lambda x: -x['prob'])
+                atr_ratio = 0.02
+                if 'atr_ratio' in feat_row.index and pd.notna(feat_row['atr_ratio']):
+                    atr_ratio = float(feat_row['atr_ratio'])
 
-    mvo_info = ""
-    top_n = min(5, len(buy_signals))
-    if top_n >= 2:
-        candidate_codes = [c['ts_code'] for c in buy_signals[:top_n]]
-        ml_probs = {c['ts_code']: c['prob'] for c in buy_signals[:top_n]}
-        try:
-            weights, valid_codes = portfolio_optimizer.optimize(
-                candidate_codes, all_stock_data, oamv_state_df, last_date, ml_probs
+                prob = ensemble.predict(clean_data, oamv_x_pct=oamv_x, atr_ratio=atr_ratio)[0]
+
+                if prob >= CATBOOST_BUY_THRESHOLD:
+                    white_above = df.loc[last_date, 'white_above_yellow'] if 'white_above_yellow' in df.columns else True
+                    if pd.notna(white_above) and not white_above:
+                        continue
+
+                    j_val = df.loc[last_date, 'J'] if 'J' in df.columns else 100
+                    if pd.notna(j_val) and j_val >= J_OVERSOLD_THRESHOLD:
+                        continue
+
+                    pwvc_val = feat_row.get('pwvc', 0.0)
+                    if pd.notna(pwvc_val) and pwvc_val > PWVC_VETO_THRESHOLD:
+                        continue
+
+                    amp = df.loc[last_date, 'amplitude_20'] if 'amplitude_20' in df.columns else 0
+                    if pd.notna(amp) and amp > 0 and amp < FRICTION_COST_PCT * MIN_AMPLITUDE_MULT:
+                        continue
+
+                    current_price = float(df.loc[last_date, 'Close'])
+                    current_vol = float(df.loc[last_date, 'Volume']) if 'Volume' in df.columns and pd.notna(df.loc[last_date, 'Volume']) else 0
+                    daily_vol_value = current_price * current_vol * 100
+                    order_value = portfolio.initial_cash * POSITION_SIZE_PCT
+                    participation = order_value / daily_vol_value if daily_vol_value > 0 else 1.0
+
+                    impact_slippage = (IMPACT_COEFFICIENT * np.sqrt(participation) + SPREAD_HALF) * 100
+                    impact_slippage = min(impact_slippage, MAX_SLIPPAGE_PCT)
+
+                    if impact_slippage > 1.0:
+                        continue
+
+                    buy_signals.append({
+                        'ts_code': ts_code,
+                        'name': info['name'],
+                        'prob': prob,
+                        'price': current_price,
+                        'atr': float(df.loc[last_date, 'ATR14']) if 'ATR14' in df.columns and not pd.isna(df.loc[last_date, 'ATR14']) else 0,
+                        'industry': info.get('industry', ''),
+                        'impact_slippage': float(impact_slippage),
+                        'j_val': float(j_val) if not pd.isna(j_val) else 0,
+                        'pwvc': float(pwvc_val) if not pd.isna(pwvc_val) else 0,
+                        'accumulation_score': float(feat_row.get('accumulation_score', 0)),
+                    })
+
+        buy_signals.sort(key=lambda x: -x['prob'])
+
+        mvo_info = ""
+        top_n = min(5, len(buy_signals))
+        if top_n >= 2:
+            candidate_codes = [c['ts_code'] for c in buy_signals[:top_n]]
+            ml_probs = {c['ts_code']: c['prob'] for c in buy_signals[:top_n]}
+
+            try:
+                industry_map = {code: all_stock_data.get(code, {}).get('industry', '') for code in candidate_codes}
+                weights, valid_codes = portfolio_optimizer.optimize(
+                    candidate_codes, all_stock_data, oamv_state_df, last_date, ml_probs,
+                    industry_map=industry_map
+                )
+                if len(valid_codes) > 0 and len(weights) > 0:
+                    for code, w in zip(valid_codes, weights):
+                        for s in buy_signals:
+                            if s['ts_code'] == code:
+                                s['mvo_weight'] = w
+                                break
+                    buy_signals.sort(key=lambda x: -x.get('mvo_weight', 0))
+                    mvo_info = "MVO优化完成"
+            except Exception:
+                mvo_info = "MVO优化失败，按概率排序"
+
+    # ========== Step 4: 执行买入 ==========
+    executed_buys = []
+    if mode != 'afternoon':
+        print(f"[Step 4] {mode_label}模式：跳过买入执行")
+    else:
+        available_slots = portfolio.get_available_slots()
+        print(f"[Step 4] 执行买入 (可用仓位: {available_slots})...")
+        for sig in buy_signals:
+            if available_slots <= 0:
+                break
+            success = portfolio.add_position(
+                sig['ts_code'], sig['name'], sig['price'], sig['prob'],
+                sig['atr'], date_str,
+                mvo_weight=sig.get('mvo_weight'),
+                impact_slippage=sig.get('impact_slippage', SLIPPAGE_RATE) / 100,
             )
-            if len(valid_codes) > 0 and len(weights) > 0:
-                for code, w in zip(valid_codes, weights):
-                    for s in buy_signals:
-                        if s['ts_code'] == code:
-                            s['mvo_weight'] = w
-                            break
-                buy_signals.sort(key=lambda x: -x.get('mvo_weight', 0))
-                mvo_info = "✅ MVO优化完成"
-        except Exception:
-            mvo_info = "⚠️ MVO优化失败，按概率排序"
+            if success:
+                executed_buys.append(sig)
+                available_slots -= 1
+                mvo_str = f" MVO={sig.get('mvo_weight', 0):.2f}" if sig.get('mvo_weight') else ""
+                print(f"  [买入] {sig['ts_code']} {sig['name']} @ {sig['price']:.2f} "
+                      f"RADE={sig['prob']:.1%}{mvo_str}")
 
+    # ========== Step 5: 保存持仓 ==========
+    portfolio.save()
+    if portfolio.trade_history:
+        with open(TRADE_LOG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(portfolio.trade_history, f, ensure_ascii=False, indent=2, default=str)
+
+    # ========== Step 6: LLM中长期分析 ==========
+    print("[Step 6] LLM中长期分析...")
+    llm_analyzer = LLMStockAnalyzer()
+    llm_analyses = {}
+    event_analyses = {}
+    high_risk_codes = set()
+
+    analyze_stocks = []
+    for ts_code, pos in portfolio.positions.items():
+        if ts_code in all_stock_data:
+            h_info = None
+            for h in holding_status:
+                if h['ts_code'] == ts_code:
+                    h_info = h
+                    break
+            analyze_stocks.append({
+                'ts_code': ts_code,
+                'name': pos['name'],
+                'holding_info': h_info,
+                'buy_signal': None,
+            })
+    for sig in executed_buys:
+        already = any(s['ts_code'] == sig['ts_code'] for s in analyze_stocks)
+        if not already:
+            analyze_stocks.append({
+                'ts_code': sig['ts_code'],
+                'name': sig['name'],
+                'holding_info': None,
+                'buy_signal': sig,
+            })
+
+    for stock in analyze_stocks:
+        ts_code = stock['ts_code']
+        name = stock['name']
+        data = all_stock_data.get(ts_code)
+        if data is None:
+            continue
+        try:
+            analysis = llm_analyzer.analyze_stock(
+                ts_code, name, data,
+                holding_info=stock.get('holding_info'),
+                buy_signal=stock.get('buy_signal'),
+            )
+            if analysis:
+                llm_analyses[ts_code] = analysis
+                print(f"  ✅ {ts_code} {name} 技术面分析完成")
+            else:
+                print(f"  ⚠️ {ts_code} {name} 技术面分析为空")
+        except Exception as e:
+            print(f"  ❌ {ts_code} {name} 技术面分析失败: {e}")
+
+        try:
+            news_list = fetch_stock_news(ts_code)
+            if news_list:
+                event_result = llm_analyzer.analyze_event(ts_code, name, news_list)
+                if event_result:
+                    event_analyses[ts_code] = event_result
+                    if '风险：高' in event_result or '风险:高' in event_result:
+                        high_risk_codes.add(ts_code)
+                    print(f"  📰 {ts_code} {name} 事件分析完成")
+                else:
+                    print(f"  ⚠️ {ts_code} {name} 事件分析为空")
+            else:
+                print(f"  ⚠️ {ts_code} {name} 无新闻数据")
+        except Exception as e:
+            print(f"  ❌ {ts_code} {name} 事件分析失败: {e}")
+
+    print(f"  LLM分析完成: 技术{len(llm_analyses)}/{len(analyze_stocks)} 事件{len(event_analyses)}/{len(analyze_stocks)}")
+
+    if high_risk_codes:
+        vetoed_buys = [s for s in executed_buys if s['ts_code'] in high_risk_codes]
+        for sig in vetoed_buys:
+            print(f"  🚫 {sig['ts_code']} {sig['name']} 事件高风险，取消买入")
+            portfolio.remove_position(sig['ts_code'], sig['price'], date_str, '事件高风险否决')
+            executed_buys.remove(sig)
+        portfolio.save()
+
+    # ========== Step 7: 计算组合概况 ==========
+    current_prices = {}
+    for ts_code in portfolio.positions:
+        if ts_code in all_stock_data:
+            df = all_stock_data[ts_code]['data']
+            if last_date in df.index:
+                current_prices[ts_code] = float(df.loc[last_date, 'Close'])
+            else:
+                current_prices[ts_code] = portfolio.positions[ts_code]['entry_price']
+        else:
+            current_prices[ts_code] = portfolio.positions[ts_code]['entry_price']
+
+    total_value = portfolio.get_total_value(current_prices)
+    total_return = (total_value - portfolio.initial_cash) / portfolio.initial_cash * 100
+    position_value = sum(portfolio.positions[c].get('shares', 0) * current_prices.get(c, 0)
+                         for c in portfolio.positions)
+
+    # ========== Step 7: 生成推送消息 ==========
     oamv_status = "🟢 BULL" if oamv_daily else "🔴 BEAR"
     oamv_weekly_status = "🟢 BULL" if oamv_weekly else "🔴 BEAR"
-    panic_status = "⚠️ 触发" if is_panic else "✅ 正常"
+    if market_state == 'panic':
+        panic_status = "🔴 熔断"
+    elif market_state == 'warning':
+        panic_status = "⚠️ 预警"
+    else:
+        panic_status = "✅ 正常"
 
-    title = f"v7.1每日信号 {today_display}"
+    title = f"v9.1{mode_label} {today_display} 持仓{portfolio.get_position_count()}仓 收益{total_return:+.1f}%"
 
-    desp = f"## 📊 v7.1 每日交易信号\n\n"
+    desp = f"## v9.1 {mode_label}带盘信号\n\n"
     desp += f"**日期**: {today_display}\n\n"
-    desp += f"### 大势判断\n\n"
+
+    desp += f"### 一、大势判断\n\n"
     desp += f"| 指标 | 状态 |\n|------|------|\n"
     desp += f"| 0AMV日线 | {oamv_status} (X={oamv_x:+.2f}%) |\n"
     desp += f"| 0AMV周线 | {oamv_weekly_status} |\n"
     desp += f"| 熔断器 | {panic_status} |\n"
     desp += f"| 上证指数 | {index_close:.2f} ({index_change:+.2f}%) |\n\n"
 
+    desp += f"### 二、组合概况\n\n"
+    desp += f"| 指标 | 数值 |\n|------|------|\n"
+    desp += f"| 总资产 | {total_value:,.0f} |\n"
+    desp += f"| 总收益 | {total_return:+.2f}% |\n"
+    desp += f"| 现金 | {portfolio.cash:,.0f} |\n"
+    desp += f"| 持仓市值 | {position_value:,.0f} |\n"
+    desp += f"| 持仓数 | {portfolio.get_position_count()}/{MAX_PORTFOLIO_STOCKS} |\n"
+    desp += f"| 可用仓位 | {portfolio.get_available_slots()} |\n\n"
+
+    if portfolio.trade_history:
+        wins = [t for t in portfolio.trade_history if t['profit_pct'] > 0]
+        win_rate = len(wins) / len(portfolio.trade_history) * 100
+        desp += f"| 历史交易 | {len(portfolio.trade_history)}笔 |\n"
+        desp += f"| 历史胜率 | {win_rate:.0f}% |\n\n"
+
+    if holding_status:
+        desp += f"### 三、当前持仓\n\n"
+        desp += f"| 代码 | 名称 | 买入价 | 现价 | 收益 | 回撤 | 持仓天数 | 状态 | 操作 |\n"
+        desp += f"|------|------|--------|------|------|------|----------|------|------|\n"
+        for h in holding_status:
+            desp += (f"| {h['ts_code']} | {h['name']} | {h['entry_price']:.2f} | "
+                     f"{h['current_price']:.2f} | {h['profit_pct']:+.2f}% | "
+                     f"{h['dd_pct']:.1f}% | {h['hold_days']}天 | {h['status']} | {h['action']} |\n")
+        desp += f"\n"
+
+    if sell_signals:
+        desp += f"### 四、🔴 今日卖出\n\n"
+        desp += f"| 代码 | 名称 | 卖出价 | 买入价 | 收益 | 持仓天数 | 卖出原因 |\n"
+        desp += f"|------|------|--------|--------|------|----------|----------|\n"
+        for s in sell_signals:
+            desp += (f"| {s['ts_code']} | {s['name']} | {s['price']:.2f} | "
+                     f"{s['entry_price']:.2f} | {s['profit_pct']:+.2f}% | "
+                     f"{s['hold_days']}天 | {s['reason']} |\n")
+        desp += f"\n"
+
+    if executed_buys:
+        desp += f"### 五、🟢 今日买入\n\n"
+        desp += f"| 代码 | 名称 | 买入价 | RADE | ATR | MVO权重 | 滑点 |\n"
+        desp += f"|------|------|--------|------|-----|--------|------|\n"
+        for s in executed_buys:
+            mvo_w = f"{s['mvo_weight']:.2f}" if s.get('mvo_weight') is not None else "-"
+            desp += (f"| {s['ts_code']} | {s['name']} | {s['price']:.2f} | "
+                     f"{s['prob']:.1%} | {s['atr']:.2f} | {mvo_w} | {s['impact_slippage']:.3f}% |\n")
+        desp += f"\n"
+
     if not oamv_weekly:
-        desp += f"### ⏸️ 操作建议：空仓观望\n\n"
+        desp += f"### 操作建议：空仓观望\n\n"
         desp += f"0AMV周线BEAR，不建议买入。等待周线翻多信号。\n\n"
-    elif is_panic:
-        desp += f"### ⚠️ 操作建议：熔断器触发\n\n"
+    elif market_state == 'panic':
+        desp += f"### 操作建议：🔴 熔断器触发\n\n"
         desp += f"市场出现恐慌信号，建议清仓避险。\n\n"
-    else:
-        desp += f"### 🟢 操作建议：可买入\n\n"
-        if buy_signals:
-            desp += f"**扫描到 {len(buy_signals)} 只候选股**（RADE概率≥65%）\n\n"
-            desp += f"| 排名 | 代码 | 名称 | 行业 | 现价 | RADE概率 | ATR | MVO权重 | 冲击滑点 |\n"
-            desp += f"|------|------|------|------|------|----------|-----|--------|----------|\n"
-            for i, s in enumerate(buy_signals[:10], 1):
-                mvo_w = f"{s['mvo_weight']:.2f}" if s.get('mvo_weight') is not None else "-"
-                impact_s = f"{s['impact_slippage']:.2%}" if s.get('impact_slippage') is not None else "-"
-                desp += f"| {i} | {s['ts_code']} | {s['name']} | {s['industry']} | {s['price']:.2f} | {s['prob']:.1%} | {s['atr']:.2f} | {mvo_w} | {impact_s} |\n"
+    elif market_state == 'warning':
+        desp += f"### 操作建议：⚠️ 市场预警\n\n"
+        desp += f"市场出现预警信号（跌停增速/宽度恶化），禁止新买入，持仓可正常止盈止损。\n\n"
+    elif buy_signals and not executed_buys:
+        desp += f"### 六、候选买入信号（仓位已满）\n\n"
+        desp += f"当前{portfolio.get_position_count()}仓已满，以下候选股待仓位释放后关注：\n\n"
+        desp += f"| # | 代码 | 名称 | 行业 | 现价 | RADE | J值 | PWVC | ATR |\n"
+        desp += f"|---|------|------|------|------|------|-----|------|-----|\n"
+        for i, s in enumerate(buy_signals[:5], 1):
+            desp += (f"| {i} | {s['ts_code']} | {s['name']} | {s['industry']} | "
+                     f"{s['price']:.2f} | {s['prob']:.1%} | {s['j_val']:.1f} | "
+                     f"{s['pwvc']:.2f} | {s['atr']:.2f} |\n")
+        desp += f"\n"
+    elif buy_signals and len(executed_buys) < len(buy_signals):
+        remaining = [s for s in buy_signals if s not in executed_buys]
+        if remaining:
+            desp += f"### 六、其他候选信号\n\n"
+            desp += f"| # | 代码 | 名称 | 行业 | 现价 | RADE | J值 | ATR |\n"
+            desp += f"|---|------|------|------|------|------|-----|-----|\n"
+            for i, s in enumerate(remaining[:5], 1):
+                desp += (f"| {i} | {s['ts_code']} | {s['name']} | {s['industry']} | "
+                         f"{s['price']:.2f} | {s['prob']:.1%} | {s['j_val']:.1f} | "
+                         f"{s['atr']:.2f} |\n")
             desp += f"\n{mvo_info}\n\n"
-            desp += f"**建议买入前3只**（MVO权重最高）\n\n"
-        else:
-            desp += f"今日无符合条件的买入信号。\n\n"
+
+    desp += f"**四大共识过滤**: PWVC>{PWVC_VETO_THRESHOLD}否决 / 白>黄强制 / J<{J_OVERSOLD_THRESHOLD}冰点\n\n"
+
+    if llm_analyses:
+        desp += f"### 🤖 AI技术面分析（DeepSeek）\n\n"
+        for ts_code, analysis in llm_analyses.items():
+            pos_name = portfolio.positions.get(ts_code, {}).get('name', '')
+            if not pos_name:
+                for sig in executed_buys:
+                    if sig['ts_code'] == ts_code:
+                        pos_name = sig['name']
+                        break
+            if not pos_name:
+                pos_name = ts_code
+            desp += f"**{ts_code} {pos_name}**\n\n{analysis}\n\n"
+
+    if event_analyses:
+        desp += f"### 📰 AI事件面分析（DeepSeek）\n\n"
+        for ts_code, analysis in event_analyses.items():
+            pos_name = portfolio.positions.get(ts_code, {}).get('name', '')
+            if not pos_name:
+                for sig in executed_buys:
+                    if sig['ts_code'] == ts_code:
+                        pos_name = sig['name']
+                        break
+            if not pos_name:
+                pos_name = ts_code
+            risk_tag = " ⚠️高风险" if ts_code in high_risk_codes else ""
+            desp += f"**{ts_code} {pos_name}{risk_tag}**\n\n{analysis}\n\n"
 
     drift_alert_msg = ""
     if drift_detector.drift_detected:
-        drift_alert_msg = f"\n\n### ⚠️ ADDM漂移告警\n\n[ALERT] 检测到市场概念漂移（ADDM触发）！系统已启动紧急重新训练... 漂移次数: {drift_detector.drift_count}\n"
-        if SERVERCHAN_KEY:
+        drift_alert_msg = f"\n\n### ADDM漂移告警\n\n检测到市场概念漂移！漂移次数: {drift_detector.drift_count}\n"
+        if SERVERCHAN_KEYS:
             send_serverchan(f"[ALERT] ADDM漂移检测 {today_display}", drift_alert_msg)
 
-    desp += f"{drift_alert_msg}"
+    desp += drift_alert_msg
 
     desp += f"---\n\n"
-    desp += f"*策略: v7.1 ChebyKAN+GARCH-ADDM+SqrtImpact | 数据: Tushare | 本信号仅供参考，不构成投资建议*\n"
+    desp += f"*v9.1 {mode_label}模式 | 自动卖出+自动建仓+Server酱推送 | 仅供参考，不构成投资建议*\n"
 
     print("\n" + "=" * 60)
     print(title)
@@ -577,22 +1085,36 @@ def run_daily_scan():
     print(f"0AMV周线: {oamv_weekly_status}")
     print(f"熔断器: {panic_status}")
     print(f"上证: {index_close:.2f} ({index_change:+.2f}%)")
+    print(f"总资产: {total_value:,.0f} | 收益: {total_return:+.2f}%")
+    print(f"现金: {portfolio.cash:,.0f} | 持仓: {portfolio.get_position_count()}/{MAX_PORTFOLIO_STOCKS}")
 
-    if buy_signals:
-        print(f"\n买入信号 ({len(buy_signals)} 只):")
-        for i, s in enumerate(buy_signals[:10], 1):
-            mvo_w = f" MVO={s['mvo_weight']:.2f}" if s.get('mvo_weight') is not None else ""
-            print(f"  {i}. {s['ts_code']} {s['name']} {s['price']:.2f} P={s['prob']:.1%}{mvo_w}")
-    else:
-        print("\n无买入信号")
+    if sell_signals:
+        print(f"\n今日卖出 ({len(sell_signals)} 只):")
+        for s in sell_signals:
+            print(f"  🔴 {s['ts_code']} {s['name']} @ {s['price']:.2f} "
+                  f"收益={s['profit_pct']:+.2f}% 原因={s['reason']}")
+
+    if holding_status:
+        print(f"\n当前持仓:")
+        for h in holding_status:
+            print(f"  {h['status']} {h['ts_code']} {h['name']} "
+                  f"收益={h['profit_pct']:+.2f}% 回撤={h['dd_pct']:.1f}% {h['action']}")
+
+    if executed_buys:
+        print(f"\n今日买入 ({len(executed_buys)} 只):")
+        for s in executed_buys:
+            mvo_w = f" MVO={s['mvo_weight']:.2f}" if s.get('mvo_weight') else ""
+            print(f"  🟢 {s['ts_code']} {s['name']} @ {s['price']:.2f} "
+                  f"RADE={s['prob']:.1%}{mvo_w}")
 
     send_serverchan(title, desp)
 
     output_dir = Path(__file__).parent / "daily_scan_results"
     output_dir.mkdir(parents=True, exist_ok=True)
-    result_file = output_dir / f"scan_{today}.json"
+    result_file = output_dir / f"scan_v90_{today}.json"
     with open(result_file, 'w', encoding='utf-8') as f:
         json.dump({
+            'version': 'v9.0',
             'date': today_display,
             'oamv_daily': oamv_daily,
             'oamv_weekly': oamv_weekly,
@@ -600,14 +1122,36 @@ def run_daily_scan():
             'is_panic': is_panic,
             'index_close': index_close,
             'index_change': index_change,
+            'sell_signals': sell_signals,
+            'executed_buys': executed_buys,
             'buy_signals': buy_signals[:10],
-            'push_sent': bool(SERVERCHAN_KEY),
+            'holding_status': holding_status,
+            'portfolio': {
+                'total_value': total_value,
+                'total_return': total_return,
+                'cash': portfolio.cash,
+                'position_count': portfolio.get_position_count(),
+                'positions': portfolio.positions,
+            },
+            'push_sent': bool(SERVERCHAN_KEYS),
             'drift_detected': drift_detector.drift_detected,
             'drift_count': drift_detector.drift_count,
             'market_volatility': market_vol,
+            'consensus_filters': f'PWVC>{PWVC_VETO_THRESHOLD} / white_above_yellow / J<{J_OVERSOLD_THRESHOLD}',
+            'llm_analyses': llm_analyses,
+            'event_analyses': event_analyses,
+            'high_risk_codes': list(high_risk_codes),
         }, f, ensure_ascii=False, indent=2, default=str)
     print(f"\n结果已保存: {result_file}")
 
 
 if __name__ == "__main__":
-    run_daily_scan()
+    mode = 'afternoon'
+    if '--mode' in sys.argv:
+        idx = sys.argv.index('--mode')
+        if idx + 1 < len(sys.argv):
+            mode = sys.argv[idx + 1]
+    if mode not in ('morning', 'afternoon', 'evening'):
+        print(f"未知模式: {mode}，支持: morning, afternoon, evening")
+        sys.exit(1)
+    run_daily_scan(mode=mode)

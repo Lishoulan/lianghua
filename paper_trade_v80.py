@@ -67,6 +67,9 @@ SPREAD_HALF = 0.001
 MAX_SLIPPAGE_PCT = 2.0
 INITIAL_CASH = 500000
 
+PWVC_VETO_THRESHOLD = 0.8
+J_OVERSOLD_THRESHOLD = 13
+
 
 def is_st_stock(name: str) -> bool:
     for kw in ['ST', '*ST', 'S*ST', 'SST']:
@@ -294,10 +297,11 @@ def compute_sqrt_impact_slippage(order_value, daily_volume_value):
 
 def run_paper_trade_sim():
     print("=" * 100)
-    print(f"v8.0 模拟交易回放 - ChebyKAN + GARCH-ADDM + Sqrt Impact")
+    print(f"v8.1 模拟交易回放 - ChebyKAN + GARCH-ADDM + Sqrt Impact + 四大共识硬过滤")
     print(f"最近 {SIM_DAYS} 个交易日逐日明细")
     print(f"SSA降噪 + ADDM漂移检测 + RADE集成(CatBoost+ChebyKAN) + CostAware MVO + Sqrt Impact")
     print(f"无菌清洗 + 分歧特征 + AMSE损失 + 漂移重训")
+    print(f"四大共识: OAMV迟滞 + J<{J_OVERSOLD_THRESHOLD}冰点 + PWVC>{PWVC_VETO_THRESHOLD}否决 + 白>黄强制")
     print(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 100)
 
@@ -331,7 +335,7 @@ def run_paper_trade_sim():
     disagreement_builder = DisagreementFeatureBuilder(ssa_window=10, ssa_signal_groups=2)
     portfolio_optimizer = CostAwarePortfolioOptimizer(
         n_scenarios=500, block_size=5, lookback_days=200,
-        risk_aversion=0.5, cost_aversion=1.0, max_weight=0.25,
+        risk_aversion=0.5, cost_aversion=0.5, max_weight=0.25,
         min_weight=0.0, total_max_weight=0.75,
         impact_coefficient=0.4, spread_half=0.001,
         total_capital=INITIAL_CASH
@@ -340,7 +344,7 @@ def run_paper_trade_sim():
     print(f"  SSA: window=10, signal_groups=2")
     print(f"  SterileCleaner: ON")
     print(f"  DisagreementBuilder: ssa_window=10, ssa_signal_groups=2")
-    print(f"  CostAware MVO: 500 scenarios, block_size=5, cost_aversion=1.0")
+    print(f"  CostAware MVO: 500 scenarios, block_size=5, cost_aversion=0.5")
     print(f"  ADDM: ar_order=3, ph_threshold=2.0, ph_delta=0.01, vol_filter=True, decay_lambda=0.005, retrain_cooldown=10")
     print(f"  Sqrt Impact: coeff={IMPACT_COEFFICIENT}, spread_half={SPREAD_HALF}, max_slip={MAX_SLIPPAGE_PCT}%")
 
@@ -642,6 +646,15 @@ def run_paper_trade_sim():
                     white_above = df.loc[current_date, 'white_above_yellow'] if 'white_above_yellow' in df.columns else True
                     if pd.notna(white_above) and not white_above:
                         continue
+
+                    j_val = df.loc[current_date, 'J'] if 'J' in df.columns else 100
+                    if pd.notna(j_val) and j_val >= J_OVERSOLD_THRESHOLD:
+                        continue
+
+                    pwvc_val = feat_row.get('pwvc', 0.0)
+                    if pd.notna(pwvc_val) and pwvc_val > PWVC_VETO_THRESHOLD:
+                        continue
+
                     amp = df.loc[current_date, 'amplitude_20'] if 'amplitude_20' in df.columns else 0
                     if pd.notna(amp) and amp > 0 and amp < FRICTION_COST_PCT * MIN_AMPLITUDE_MULT:
                         continue
@@ -663,6 +676,9 @@ def run_paper_trade_sim():
                         'atr': float(df.loc[current_date, 'ATR14']) if 'ATR14' in df.columns and not pd.isna(df.loc[current_date, 'ATR14']) else 0,
                         'amplitude_20': float(amp) if not pd.isna(amp) else 0,
                         'impact_slippage': impact_slippage,
+                        'pwvc': float(pwvc_val) if not pd.isna(pwvc_val) else 0,
+                        'j_val': float(j_val) if not pd.isna(j_val) else 0,
+                        'accumulation_score': float(feat_row.get('accumulation_score', 0)),
                     })
             buy_candidates.sort(key=lambda x: -x['prob'])
 
@@ -817,10 +833,10 @@ def run_paper_trade_sim():
     output_dir = Path(__file__).parent / "paper_trade_results"
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_file = output_dir / f"paper_trade_v80_{timestamp}.json"
+    result_file = output_dir / f"paper_trade_v81_{timestamp}.json"
     with open(result_file, 'w', encoding='utf-8') as f:
         json.dump({
-            'version': 'v8.0',
+            'version': 'v8.1',
             'sim_period': f"{sim_dates[0].strftime('%Y-%m-%d')}~{sim_dates[-1].strftime('%Y-%m-%d')}",
             'daily_log': daily_log,
             'all_trades': all_trades,

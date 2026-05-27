@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
-sys.path.insert(0, str(Path(__file__).parent.parent / "pip_libs"))
 
 
 class FeatureDiscretizer:
@@ -145,15 +144,58 @@ class FeatureDiscretizer:
 
         df['low_above_yellow'] = (df['Low'] > df['yellow_line']).astype(int)
 
-        if 'pwvc' not in df.columns:
-            df['pwvc'] = 0.0
-        if 'close_position_20' not in df.columns:
-            df['close_position_20'] = 0.5
-        if 'pwvc_distribution' not in df.columns:
-            df['pwvc_distribution'] = 0
-        if 'j_clean' not in df.columns:
-            df['j_clean'] = df.get('j_raw', 0.0)
+        df['close_position_20'] = df['price_position_20']
+        
+        # 改进的PWVC计算：高位放量阴线才否决，且保持否决3天
+        df['is_red_candle'] = (df['Close'] < df['Open']).astype(int)
+        high_5 = df['High'].rolling(window=5, min_periods=1).max()
+        low_5 = df['Low'].rolling(window=5, min_periods=1).min()
+        df['close_position_5'] = np.where(high_5 > low_5, 
+                                          (df['Close'] - low_5) / (high_5 - low_5), 
+                                          0.5)
+        
+        # 关键修改：看最高价或开盘价的位置，而不是收盘价！
+        df['high_position_5'] = np.where(high_5 > low_5, 
+                                         (df['High'] - low_5) / (high_5 - low_5), 
+                                         0.5)
+        df['open_position_5'] = np.where(high_5 > low_5, 
+                                         (df['Open'] - low_5) / (high_5 - low_5), 
+                                         0.5)
+        df['top_position_5'] = np.maximum(df['high_position_5'], df['open_position_5'])
+        
+        # 单日PWVC：只有当：放量(vol_ratio_20>1.5) AND 阴线 AND 近期高位(top_position_5>0.6)时，才触发高值
+        df['pwvc_day'] = df['vol_ratio_20'] * (df['top_position_5'] - 0.5) * df['is_red_candle']
+        
+        # 过去3天内如果有任何一天pwvc_day>0.8，就保持否决
+        df['pwvc'] = df['pwvc_day'].rolling(window=3, min_periods=1).max()
+        
+        df['pwvc_distribution'] = 0
+        df.loc[df['pwvc'] > 1.5, 'pwvc_distribution'] = 2
+        df.loc[(df['pwvc'] > 0.5) & (df['pwvc'] <= 1.5), 'pwvc_distribution'] = 1
 
+        df['j_clean'] = df['j_raw'].clip(-20, 120)
+
+        vol_explosion = (df['vol_ratio_20'] > 2.0).astype(int)
+        vol_explosion_count_10 = vol_explosion.rolling(window=10, min_periods=1).sum()
+
+        white_above = df['white_above_yellow']
+        golden_cross = (white_above == 1) & (white_above.shift(1) == 0)
+        golden_cross_recent_5 = golden_cross.rolling(window=5, min_periods=1).sum()
+
+        accumulation_score = pd.Series(0.0, index=df.index, dtype=float)
+        accumulation_score += vol_explosion_count_10.clip(upper=3) / 3.0 * 0.5
+        accumulation_score += golden_cross_recent_5.clip(upper=1) * 0.5
+        low_position_mask = df['close_position_20'] < 0.5
+        accumulation_score = accumulation_score.where(low_position_mask, accumulation_score * 0.3)
+        df['accumulation_score'] = accumulation_score
+
+        return df
+
+    def add_path_signatures(self, df, sig_builder=None):
+        if sig_builder is None:
+            from ml_strategy.path_signature import PathSignatureBuilder
+            sig_builder = PathSignatureBuilder(truncation_level=2, path_dims=3, path_length=5, lead_lag=False)
+        df = sig_builder.compute_signature_features(df)
         return df
 
     def add_market_context(self, stock_df, index_df=None, hmm_result=None,

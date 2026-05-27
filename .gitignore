@@ -17,3 +17,10 @@ auto_trade.log
 *.log
 .DS_Store
 Thumbs.db
+backtest_results/
+catboost_info/
+daily_scan_results/
+results/
+*.cbm
+events.out.tfevents
+*.tsv

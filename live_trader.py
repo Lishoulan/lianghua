@@ -7,7 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
 
-sys.path.insert(0, str(Path(__file__).parent / "pip_libs"))
+# sys.path.insert(0, str(Path(__file__).parent / "pip_libs"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
@@ -25,18 +25,24 @@ from ml_strategy.panic_breaker import MarketPanicCircuitBreaker
 from ml_strategy.ssa_denoiser import SSADenoiser
 from ml_strategy.chebykan_predictor import ChebyKANTrainer
 from ml_strategy.rade_ensemble import RADEEnsemble
-from ml_strategy.portfolio_optimizer import BootstrappedMVO
 from ml_strategy.drift_detector import ADDMDriftDetector
+from ml_strategy.sterile_cleaner import SterileDataCleaner
+from ml_strategy.disagreement_features import DisagreementFeatureBuilder
+from ml_strategy.cost_aware_optimizer import CostAwarePortfolioOptimizer
+from ml_strategy.path_signature import PathSignatureBuilder
+from ml_strategy.llm_analyzer import LLMStockAnalyzer
 from auto_trader import AutoTrader
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 
 TUSHARE_TOKEN = os.getenv('TUSHARE_TOKEN')
-SERVERCHAN_KEY = os.getenv('SERVERCHAN_KEY', '')
+SERVERCHAN_KEYS = [k.strip() for k in os.getenv('SERVERCHAN_KEY', '').split(',') if k.strip()]
 pro = None
 if TUSHARE_TOKEN:
     try:
         pro = ts.pro_api(TUSHARE_TOKEN)
+        ts.set_token(TUSHARE_TOKEN)
+        pro = ts.pro_api(timeout=120)
     except Exception as e:
         print(f"Tushare init failed: {e}")
         sys.exit(1)
@@ -351,26 +357,30 @@ class LivePortfolio:
 
 
 def send_serverchan(title, desp):
-    if not SERVERCHAN_KEY:
+    if not SERVERCHAN_KEYS:
         return False
     import requests
-    url = f"https://sctapi.ftqq.com/{SERVERCHAN_KEY}.send"
-    data = {"title": title, "desp": desp}
-    try:
-        resp = requests.post(url, data=data, timeout=10)
-        if resp.status_code == 200:
-            result = resp.json()
-            if result.get('code') == 0:
-                print("  Server酱推送成功")
-                return True
-    except Exception:
-        pass
+    success_count = 0
+    for key in SERVERCHAN_KEYS:
+        url = f"https://sctapi.ftqq.com/{key}.send"
+        data = {"title": title, "desp": desp}
+        try:
+            resp = requests.post(url, data=data, timeout=10)
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get('code') == 0:
+                    success_count += 1
+        except Exception:
+            pass
+    if success_count > 0:
+        print(f"  Server酱推送成功: {success_count}/{len(SERVERCHAN_KEYS)}")
+        return True
     return False
 
 
 def run_live_trader():
     print("=" * 90)
-    print("v7.1 实盘交易系统 - ChebyKAN + GARCH-ADDM + Sqrt Impact")
+    print("v9.0 实盘交易系统 - PathSignatures + AlphaGlass + ProteuS + 四大共识过滤")
     print(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 90)
 
@@ -412,9 +422,15 @@ def run_live_trader():
     print(f"  行业: {len(industry_j_cache)}")
 
     ssa_denoiser = SSADenoiser(window_length=10, n_signal_groups=2)
-    portfolio_optimizer = BootstrappedMVO(
+    sig_builder = PathSignatureBuilder(truncation_level=2, path_dims=3, path_length=5, lead_lag=False)
+    sterile_cleaner = SterileDataCleaner()
+    disagreement_builder = DisagreementFeatureBuilder(ssa_window=10, ssa_signal_groups=2)
+    portfolio_optimizer = CostAwarePortfolioOptimizer(
         n_scenarios=500, block_size=5, lookback_days=200,
-        risk_aversion=0.5, max_weight=0.25, min_weight=0.0, total_max_weight=0.75
+        risk_aversion=0.5, cost_aversion=0.5, max_weight=0.25,
+        min_weight=0.0, total_max_weight=0.75,
+        impact_coefficient=0.4, spread_half=0.001,
+        total_capital=portfolio.initial_cash
     )
     drift_detector = ADDMDriftDetector(ar_order=3, ph_threshold=2.0, ph_delta=0.01, use_vol_filter=True)
 
@@ -491,8 +507,10 @@ def run_live_trader():
         limit_down_threshold=PANIC_LIMIT_DOWN_THRESHOLD, ma_period=20
     )
     panic_breaker.compute_market_breadth(all_stock_data)
-    is_panic = panic_breaker.is_panic(latest_date)
-    print(f"  Layer 2 - 熔断器: {'触发!' if is_panic else '正常'}")
+    market_state = panic_breaker.get_market_state(latest_date)
+    is_panic = market_state == 'panic'
+    state_display = {'normal': '正常', 'warning': '⚠️预警', 'panic': '触发!'}.get(market_state, '正常')
+    print(f"  Layer 2 - 熔断器: {state_display}")
 
     if 'ATR14' in index_df.columns and latest_date in index_df.index:
         market_atr = float(index_df.loc[latest_date, 'ATR14'])
@@ -528,9 +546,6 @@ def run_live_trader():
                 pos['peak_price'] = current_price
 
             hold_days = (pd.Timestamp(current_date_str) - pd.Timestamp(pos['entry_date'])).days
-            if hold_days < MIN_HOLD_DAYS:
-                print(f"  {ts_code} {pos['name']}: 持仓{hold_days}天 < {MIN_HOLD_DAYS}天最小持仓，继续持有")
-                continue
 
             sell_reason = None
 
@@ -538,7 +553,8 @@ def run_live_trader():
                 sell_reason = 'panic_circuit_breaker'
             elif not daily_ok:
                 sell_reason = 'oamv_daily_bear'
-            else:
+
+            if sell_reason is None and hold_days >= MIN_HOLD_DAYS:
                 yellow_line = latest_row.get('yellow_line')
                 if yellow_line is not None and not pd.isna(yellow_line):
                     if current_price < yellow_line:
@@ -585,6 +601,8 @@ def run_live_trader():
         print("  日线0AMV = BEAR，跳过选股")
     elif is_panic:
         print("  熔断触发，跳过选股")
+    elif market_state == 'warning':
+        print("  市场预警，禁止新买入")
     elif not weekly_ok:
         print("  周线EMA-5 = BEAR，禁止新开仓")
     elif not portfolio.can_buy():
@@ -705,6 +723,15 @@ def run_live_trader():
                     white_above = df.loc[latest_date, 'white_above_yellow'] if 'white_above_yellow' in df.columns else True
                     if pd.notna(white_above) and not white_above:
                         continue
+
+                    j_val = df.loc[latest_date, 'j_clean'] if 'j_clean' in df.columns else 50
+                    if pd.notna(j_val) and j_val >= 13:
+                        continue
+
+                    pwvc_val = df.loc[latest_date, 'pwvc'] if 'pwvc' in df.columns else 0
+                    if pd.notna(pwvc_val) and pwvc_val > 0.8:
+                        continue
+
                     amp = df.loc[latest_date, 'amplitude_20'] if 'amplitude_20' in df.columns else 0
                     if pd.notna(amp) and amp > 0 and amp < FRICTION_COST_PCT * MIN_AMPLITUDE_MULT:
                         continue
@@ -742,8 +769,10 @@ def run_live_trader():
                 candidate_codes = [c['code'] for c in buy_candidates[:top_n]]
                 ml_probs = {c['code']: c['prob'] for c in buy_candidates[:top_n]}
                 try:
+                    industry_map = {code: all_stock_data.get(code, {}).get('industry', '') for code in candidate_codes}
                     weights, valid_codes = portfolio_optimizer.optimize(
-                        candidate_codes, all_stock_data, oamv_state_df, latest_date, ml_probs
+                        candidate_codes, all_stock_data, oamv_state_df, latest_date, ml_probs,
+                        industry_map=industry_map
                     )
                     if len(valid_codes) > 0 and len(weights) > 0:
                         for code, w in zip(valid_codes, weights):
@@ -797,6 +826,54 @@ def run_live_trader():
                 print(f"         价格: {sig['price']:.2f} | RADE概率: {sig['prob']:.1%}{mvo_str}{impact_str}")
                 print(f"         止损: {sig['stop_loss']:.2f} | ATR: {sig['atr']:.2f}")
             print()
+
+    print("=" * 90)
+    print("[Step 4.5] LLM中长期分析")
+    print("-" * 90)
+
+    llm_analyzer = LLMStockAnalyzer()
+    llm_analyses = {}
+
+    analyze_stocks = []
+    for ts_code, pos in portfolio.positions.items():
+        if ts_code in all_stock_data:
+            analyze_stocks.append({
+                'ts_code': ts_code,
+                'name': pos['name'],
+                'holding_info': None,
+                'buy_signal': None,
+            })
+    for sig in buy_signals:
+        already = any(s['ts_code'] == sig['code'] for s in analyze_stocks)
+        if not already:
+            analyze_stocks.append({
+                'ts_code': sig['code'],
+                'name': sig['name'],
+                'holding_info': None,
+                'buy_signal': sig,
+            })
+
+    for stock in analyze_stocks:
+        ts_code = stock['ts_code']
+        name = stock['name']
+        data = all_stock_data.get(ts_code)
+        if data is None:
+            continue
+        try:
+            analysis = llm_analyzer.analyze_stock(
+                ts_code, name, data,
+                holding_info=stock.get('holding_info'),
+                buy_signal=stock.get('buy_signal'),
+            )
+            if analysis:
+                llm_analyses[ts_code] = analysis
+                print(f"  {ts_code} {name} 分析完成")
+            else:
+                print(f"  {ts_code} {name} 分析为空")
+        except Exception as e:
+            print(f"  {ts_code} {name} 分析失败: {e}")
+
+    print(f"  LLM分析完成: {len(llm_analyses)}/{len(analyze_stocks)} 只")
 
     print("=" * 90)
     print("[Step 5] 执行模式选择")
@@ -861,9 +938,9 @@ def run_live_trader():
         print(f"  现金: {portfolio.cash:,.2f}")
         print(f"  持仓数: {portfolio.get_position_count()}/{MAX_PORTFOLIO_STOCKS}")
 
-        if SERVERCHAN_KEY:
-            push_title = f"v7.1自动交易 {latest_date.strftime('%m-%d')}"
-            push_msg = f"## v7.1 自动交易执行报告\n\n"
+        if SERVERCHAN_KEYS:
+            push_title = f"v9.0自动交易 {latest_date.strftime('%m-%d')}"
+            push_msg = f"## v9.0 自动交易执行报告\n\n"
             push_msg += f"**模式**: {'模拟' if dry_run else '实盘'}\n\n"
             if sell_signals:
                 push_msg += "### 卖出\n"
@@ -940,7 +1017,7 @@ def run_live_trader():
     signal_data = {
         'date': latest_date.strftime('%Y-%m-%d'),
         'time': datetime.now().strftime('%H:%M:%S'),
-        'version': 'v7.1',
+        'version': 'v9.0',
         'oamv_daily': 'BULL' if daily_ok else 'BEAR',
         'oamv_weekly': 'BULL' if weekly_ok else 'BEAR',
         'oamv_x': latest_x,
@@ -950,7 +1027,8 @@ def run_live_trader():
             'cash': portfolio.cash,
             'positions': portfolio.positions,
             'position_count': portfolio.get_position_count(),
-        }
+        },
+        'llm_analyses': llm_analyses,
     }
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -968,11 +1046,11 @@ def run_live_trader():
     if drift_detector.drift_detected:
         drift_alert = f"[ALERT] 检测到市场概念漂移（ADDM触发）！系统已启动紧急重新训练... 漂移次数: {drift_detector.drift_count}"
         print(f"\n  {drift_alert}")
-        if SERVERCHAN_KEY:
+        if SERVERCHAN_KEYS:
             send_serverchan(f"[ALERT] ADDM漂移检测 {latest_date.strftime('%Y-%m-%d')}", drift_alert)
 
-    if signals and SERVERCHAN_KEY:
-        push_title = f"v7.1交易信号 {latest_date.strftime('%Y-%m-%d')}"
+    if signals and SERVERCHAN_KEYS:
+        push_title = f"v9.0交易信号 {latest_date.strftime('%Y-%m-%d')}"
         push_desp = "## 交易信号\n\n"
         for sig in signals:
             if sig['action'] == 'SELL':
@@ -981,17 +1059,22 @@ def run_live_trader():
                 mvo_str = f" MVO={sig['mvo_weight']:.2f}" if sig.get('mvo_weight') else ""
                 impact_str = f" 冲击滑点={sig['impact_slippage']:.2%}" if sig.get('impact_slippage') else ""
                 push_desp += f"- **买入** {sig['code']} {sig['name']} @ {sig['price']:.2f} RADE={sig['prob']:.1%}{mvo_str}{impact_str}\n"
+        if llm_analyses:
+            push_desp += "\n### AI中长期分析（DeepSeek）\n\n"
+            for ts_code, analysis in llm_analyses.items():
+                pos_name = portfolio.positions.get(ts_code, {}).get('name', ts_code)
+                push_desp += f"**{ts_code} {pos_name}**\n\n{analysis}\n\n"
         send_serverchan(push_title, push_desp)
 
     print("\n" + "=" * 90)
-    print("v7.1 实盘交易系统运行完毕")
+    print("v9.0 实盘交易系统运行完毕")
     print("=" * 90)
 
 
 def show_portfolio_status():
     portfolio = LivePortfolio.load()
     print("=" * 60)
-    print("v7.1 实盘持仓状态")
+    print("v9.0 实盘持仓状态")
     print(f"更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     print(f"  初始资金: {portfolio.initial_cash:,.0f}")
@@ -1106,17 +1189,17 @@ def manual_update():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        cmd = sys.argv[1]
-        if cmd == 'status':
+        # 检查是否有 status/update/reset 命令
+        if 'status' in sys.argv:
             show_portfolio_status()
-        elif cmd == 'update':
+        elif 'update' in sys.argv:
             manual_update()
-        elif cmd == 'reset':
+        elif 'reset' in sys.argv:
             portfolio = LivePortfolio()
             portfolio.save()
             print("账户已重置")
         else:
-            print(f"未知命令: {cmd}")
-            print("用法: python live_trader.py [status|update|reset]")
+            # 否则运行 live trader，参数会在 run_live_trader 中处理
+            run_live_trader()
     else:
         run_live_trader()

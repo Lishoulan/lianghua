@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
-sys.path.insert(0, str(Path(__file__).parent.parent / "pip_libs"))
 from catboost import CatBoostClassifier, Pool
 from ml_strategy.amse_loss import AMSELossCatBoost
 
@@ -21,6 +20,11 @@ class CatBoostPredictor:
         'return_1d', 'return_5d', 'price_position_20', 'low_above_yellow',
         'index_yellow_slope', 'index_state2_prob', 'industry_oversold',
         'pwvc', 'close_position_20', 'pwvc_distribution', 'j_clean',
+        'accumulation_score',
+        'sig_l1_0', 'sig_l1_1', 'sig_l1_2',
+        'sig_l2_0', 'sig_l2_1', 'sig_l2_2',
+        'sig_l2_3', 'sig_l2_4', 'sig_l2_5',
+        'sig_l2_6', 'sig_l2_7', 'sig_l2_8',
     ]
 
     CATEGORICAL_FEATURES = ['price_zone', 'j_zone', 'k_pattern', 'pwvc_distribution']

@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
-sys.path.insert(0, str(Path(__file__).parent.parent / "pip_libs"))
 import lightgbm as lgb
 
 
