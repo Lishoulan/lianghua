@@ -280,6 +280,33 @@ def compute_industry_analysis(signals_data, industry_map):
 # ══════════════════════════════════════════════════════════
 
 def get_all_a_stocks():
+    """获取全市场A股列表 —— 优先akshare（无限流），备用tushare"""
+    # 尝试 akshare
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_spot_em()
+        if df is not None and len(df) > 100:
+            stocks = []
+            for _, row in df.iterrows():
+                code = str(row.get("代码", ""))
+                name = str(row.get("名称", ""))
+                if not code or name.startswith("ST") or name.startswith("*ST") or name.startswith("N"):
+                    continue
+                # 转换为ts_code格式
+                if code.startswith("6"):
+                    ts_code = f"{code}.SH"
+                elif code.startswith("0") or code.startswith("3"):
+                    ts_code = f"{code}.SZ"
+                else:
+                    continue
+                industry = str(row.get("行业", ""))
+                stocks.append((ts_code, name, industry))
+            if len(stocks) > 100:
+                print(f"  akshare获取股票列表: {len(stocks)}只")
+                return stocks
+    except Exception as e:
+        print(f"  akshare获取股票列表失败: {e}")
+    # 降级到tushare
     try:
         stock_basic = _get_pro().stock_basic(exchange="", list_status="L", fields="ts_code,symbol,name,industry,list_date")
         a_stocks = stock_basic[
@@ -297,6 +324,30 @@ def get_all_a_stocks():
 
 
 def get_stock_data(ts_code):
+    """获取单只股票日线数据 —— 优先akshare（无限流），备用tushare"""
+    # 尝试 akshare
+    try:
+        import akshare as ak
+        symbol = ts_code.split(".")[0]
+        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
+                                start_date="20240101", end_date=end_date, adjust="qfq")
+        if df is not None and len(df) >= 130:
+            col_map = {"开盘": "Open", "最高": "High", "最低": "Low",
+                       "收盘": "Close", "成交量": "Volume"}
+            for old, new in col_map.items():
+                if old in df.columns:
+                    df[new] = df[old].astype(float)
+            if "日期" in df.columns:
+                df["Date"] = pd.to_datetime(df["日期"])
+            df.set_index("Date", inplace=True)
+            df = df.sort_index()
+            df = df[df["Volume"] > 0]
+            if not df.empty and len(df) >= 130:
+                return df
+    except Exception:
+        pass
+    # 降级到tushare
     try:
         end_date = pd.Timestamp.now().strftime("%Y%m%d")
         df = _get_pro().daily(ts_code=ts_code, start_date="20240101", end_date=end_date)
@@ -501,8 +552,8 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
             print(f"  潜伏信号: {name}({ts_code}) [{industry}] {latest['Close']:.2f} {change_pct:+.2f}% "
                   f"J:{latest['J']:.1f} 量比:{vol_ratio:.2f}", flush=True)
 
-        if processed % 150 == 0:
-            time.sleep(60)
+        if processed % 300 == 0:
+            time.sleep(5)  # akshare无限流，短暂休息即可
 
     elapsed = time.time() - start_time
     print(f"\n扫描完成! 耗时: {elapsed/60:.1f}min | 信号: {len(signals)}只 | 错误: {errors}", flush=True)

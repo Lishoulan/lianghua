@@ -1,4 +1,5 @@
 tushare>=1.2.89
+akshare>=1.12.0
 mootdx>=0.5.8
 pandas>=1.5.0
 numpy>=1.23.0
