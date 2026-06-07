@@ -25,6 +25,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -477,15 +478,40 @@ def batch_prefilter_stocks():
         # 这里只做粗筛，后续逐只精确计算
         if "涨跌幅" in df.columns:
             df = df[df["涨跌幅"] < 5]  # 排除已经大涨的
-        print(f"  批量预筛选: {len(df)}只（排除ST/停牌/北交所/已大涨）")
+        # 更激进的预筛选：排除高价股(>100元)和低价股(<3元)
+        if "最新价" in df.columns:
+            df = df[(df["最新价"] >= 3) & (df["最新价"] <= 100)]
+        # 排除换手率过低的（<0.5%说明无人关注）
+        if "换手率" in df.columns:
+            df = df[df["换手率"] >= 0.5]
+        # 排除涨跌幅<-5%的（大跌股不适合潜伏）
+        if "涨跌幅" in df.columns:
+            df = df[df["涨跌幅"] > -5]
+        print(f"  批量预筛选: {len(df)}只（排除ST/停牌/北交所/已大涨/极端价格/低换手）")
         return df
     except Exception as e:
         print(f"  批量预筛选失败: {e}")
         return None
 
 
+def _fetch_and_process_one(ts_code, name, industry, best_params):
+    """获取单只股票数据并计算指标，返回 (ts_code, name, industry, df_or_None)"""
+    try:
+        df = get_stock_data(ts_code)
+        if df is None:
+            return (ts_code, name, industry, None)
+        df = IndicatorCalcBase(df)
+        df = add_micro_confirm_indicators(df)
+        df = Detect_AmbushSignal_V63(df, best_params)
+        if df is None or len(df) < 130:
+            return (ts_code, name, industry, None)
+        return (ts_code, name, industry, df)
+    except Exception:
+        return (ts_code, name, industry, None)
+
+
 def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, industry_map=None, prefilter_df=None):
-    """全市场扫描潜伏信号（含行业热度过滤）"""
+    """全市场扫描潜伏信号（并发获取数据）"""
     all_stocks = get_all_a_stocks()
     if not all_stocks:
         print("无法获取股票列表")
@@ -499,113 +525,97 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
         print(f"  预筛选后股票数: {len(all_stocks)}/{original_count}", flush=True)
 
     total = len(all_stocks)
-    print(f"扫描股票数(预筛选后): {total}", flush=True)
+    print(f"扫描股票数(预筛选后): {total} | 并发数: 10", flush=True)
 
     signals = []
-    all_signals_data = {}  # 用于行业分析
+    all_signals_data = {}
     processed = 0
     errors = 0
-    max_errors = 200  # 错误上限，防止任务无限运行
     start_time = time.time()
 
-    for ts_code, name, industry in all_stocks:
-        processed += 1
+    # 并发获取数据（10个线程）
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {}
+        for ts_code, name, industry in all_stocks:
+            future = executor.submit(_fetch_and_process_one, ts_code, name, industry, BEST_PARAMS)
+            futures[future] = (ts_code, name, industry)
 
-        # 错误上限检查
-        if errors >= max_errors:
-            print(f"  错误数达到{max_errors}，停止扫描，使用已有信号", flush=True)
-            break
+        for future in as_completed(futures):
+            ts_code, name, industry = futures[future]
+            processed += 1
 
-        if processed % 200 == 0:
-            elapsed = time.time() - start_time
-            eta = elapsed / processed * (total - processed) if processed > 0 else 0
-            print(f"  进度: {processed}/{total} ({processed/total*100:.1f}%) | "
-                  f"信号:{len(signals)} | 失败:{errors} | ETA:{eta:.0f}s", flush=True)
+            if processed % 200 == 0:
+                elapsed = time.time() - start_time
+                eta = elapsed / processed * (total - processed) if processed > 0 else 0
+                print(f"  进度: {processed}/{total} ({processed/total*100:.1f}%) | "
+                      f"信号:{len(signals)} | 失败:{errors} | ETA:{eta:.0f}s", flush=True)
 
-        df = get_stock_data(ts_code)
-        if df is None:
-            errors += 1
-            continue
-
-        try:
-            df = IndicatorCalcBase(df)
-            df = add_micro_confirm_indicators(df)
-            df = Detect_AmbushSignal_V63(df, BEST_PARAMS)
-        except Exception:
-            errors += 1
-            continue
-
-        if df is None or len(df) < 130:
-            errors += 1
-            continue
-
-        # 保存用于行业分析
-        all_signals_data[ts_code] = df
-
-        latest = df.iloc[-1]
-        if pd.isna(latest.get("yellow_line")) or pd.isna(latest.get("white_line")):
-            continue
-
-        signal_date = df.index[-1]
-        if oamv_weekly_allowed_dates is not None:
-            if signal_date not in oamv_weekly_allowed_dates:
+            try:
+                result_ts_code, result_name, result_industry, df = future.result()
+            except Exception:
+                errors += 1
                 continue
 
-        if latest.get("ambush_signal", False):
-            # V6.2：行业热度过滤
-            ind_allowed = True
-            if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
-                try:
-                    ind_val = industry_allow_matrix[industry].reindex([signal_date])
-                    if not ind_val.empty and not ind_val.iloc[0]:
-                        ind_allowed = False
-                except:
-                    pass
-
-            if not ind_allowed:
+            if df is None:
+                errors += 1
                 continue
 
-            prev = df.iloc[-2]
-            change_pct = (latest["Close"] - prev["Close"]) / prev["Close"] * 100
-            vol_ratio = latest["Volume"] / latest["volume_ma"] if latest["volume_ma"] > 0 else 0
+            # 保存用于行业分析
+            all_signals_data[ts_code] = df
 
-            detail = analyze_signal_detail(df, len(df) - 1)
+            latest = df.iloc[-1]
+            if pd.isna(latest.get("yellow_line")) or pd.isna(latest.get("white_line")):
+                continue
 
-            window = BEST_PARAMS["ambush_window"]
-            sos_dates = []
-            for j in range(max(0, len(df) - window), len(df)):
-                if df.iloc[j].get("tag_sos_anchor", False):
-                    sos_dates.append(df.index[j].strftime("%m-%d"))
+            signal_date = df.index[-1]
+            if oamv_weekly_allowed_dates is not None:
+                if signal_date not in oamv_weekly_allowed_dates:
+                    continue
 
-            # 行业动量
-            ind_momentum = ""
-            if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
-                try:
-                    mom_df_ref = industry_allow_matrix._mom_df if hasattr(industry_allow_matrix, '_mom_df') else None
-                except:
-                    pass
+            if latest.get("ambush_signal", False):
+                # 行业热度过滤
+                ind_allowed = True
+                if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
+                    try:
+                        ind_val = industry_allow_matrix[industry].reindex([signal_date])
+                        if not ind_val.empty and not ind_val.iloc[0]:
+                            ind_allowed = False
+                    except:
+                        pass
 
-            signal_info = {
-                "code": ts_code,
-                "name": name,
-                "industry": industry,
-                "price": round(float(latest["Close"]), 2),
-                "change_pct": round(float(change_pct), 2),
-                "white_line": round(float(latest["white_line"]), 2),
-                "yellow_line": round(float(latest["yellow_line"]), 2),
-                "J": round(float(latest["J"]), 1),
-                "atr14": round(float(latest["atr14"]), 2),
-                "vol_ratio": round(float(vol_ratio), 2),
-                "sos_dates": sos_dates,
-                "analysis": detail,
-                "signal_date": signal_date.strftime("%Y-%m-%d"),
-            }
-            signals.append(signal_info)
-            print(f"  潜伏信号: {name}({ts_code}) [{industry}] {latest['Close']:.2f} {change_pct:+.2f}% "
-                  f"J:{latest['J']:.1f} 量比:{vol_ratio:.2f}", flush=True)
+                if not ind_allowed:
+                    continue
 
-        if processed % 300 == 0:
-            time.sleep(5)  # akshare无限流，短暂休息即可
+                prev = df.iloc[-2]
+                change_pct = (latest["Close"] - prev["Close"]) / prev["Close"] * 100
+                vol_ratio = latest["Volume"] / latest["volume_ma"] if latest["volume_ma"] > 0 else 0
+
+                detail = analyze_signal_detail(df, len(df) - 1)
+
+                window = BEST_PARAMS["ambush_window"]
+                sos_dates = []
+                for j in range(max(0, len(df) - window), len(df)):
+                    if df.iloc[j].get("tag_sos_anchor", False):
+                        sos_dates.append(df.index[j].strftime("%m-%d"))
+
+                signal_info = {
+                    "code": ts_code,
+                    "name": name,
+                    "industry": industry,
+                    "price": round(float(latest["Close"]), 2),
+                    "change_pct": round(float(change_pct), 2),
+                    "white_line": round(float(latest["white_line"]), 2),
+                    "yellow_line": round(float(latest["yellow_line"]), 2),
+                    "J": round(float(latest["J"]), 1),
+                    "atr14": round(float(latest["atr14"]), 2),
+                    "vol_ratio": round(float(vol_ratio), 2),
+                    "sos_dates": sos_dates,
+                    "analysis": detail,
+                    "signal_date": signal_date.strftime("%Y-%m-%d"),
+                }
+                signals.append(signal_info)
+                print(f"  潜伏信号: {name}({ts_code}) [{industry}] {latest['Close']:.2f} {change_pct:+.2f}% "
+                      f"J:{latest['J']:.1f} 量比:{vol_ratio:.2f}", flush=True)
 
     elapsed = time.time() - start_time
     print(f"\n扫描完成! 耗时: {elapsed/60:.1f}min | 信号: {len(signals)}只 | 错误: {errors}", flush=True)
