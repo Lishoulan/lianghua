@@ -445,24 +445,76 @@ def analyze_signal_detail(df, signal_idx):
     return analysis
 
 
-def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, industry_map=None):
+def batch_prefilter_stocks():
+    """用akshare批量获取全市场实时行情，快速预筛选潜在信号股"""
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_spot_em()
+        if df is None or len(df) == 0:
+            return None
+        # 基本过滤：排除ST、北交所、停牌
+        df = df[~df["名称"].str.startswith("ST", na=False)]
+        df = df[~df["名称"].str.startswith("*ST", na=False)]
+        df = df[~df["名称"].str.startswith("N", na=False)]
+        df = df[~df["名称"].str.contains("退", na=False)]
+        # 排除停牌（成交量为0）
+        if "成交量" in df.columns:
+            df = df[df["成交量"] > 0]
+        # 排除北交所（代码8/9开头）
+        df = df[~df["代码"].str.startswith("8", na=False)]
+        df = df[~df["代码"].str.startswith("9", na=False)]
+        # 转换为ts_code格式
+        def to_ts_code(code):
+            code = str(code)
+            if code.startswith("6"):
+                return f"{code}.SH"
+            elif code.startswith("0") or code.startswith("3"):
+                return f"{code}.SZ"
+            return None
+        df["ts_code"] = df["代码"].apply(to_ts_code)
+        df = df[df["ts_code"].notna()]
+        # 快速预筛选：价格在白线上方（Close > MA5近似）、J值偏低（涨跌幅<3%）
+        # 这里只做粗筛，后续逐只精确计算
+        if "涨跌幅" in df.columns:
+            df = df[df["涨跌幅"] < 5]  # 排除已经大涨的
+        print(f"  批量预筛选: {len(df)}只（排除ST/停牌/北交所/已大涨）")
+        return df
+    except Exception as e:
+        print(f"  批量预筛选失败: {e}")
+        return None
+
+
+def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, industry_map=None, prefilter_df=None):
     """全市场扫描潜伏信号（含行业热度过滤）"""
     all_stocks = get_all_a_stocks()
     if not all_stocks:
         print("无法获取股票列表")
         return [], {}
 
+    # 使用批量预筛选结果过滤股票列表
+    if prefilter_df is not None:
+        prefilter_codes = set(prefilter_df["ts_code"].tolist())
+        original_count = len(all_stocks)
+        all_stocks = [(tc, n, ind) for tc, n, ind in all_stocks if tc in prefilter_codes]
+        print(f"  预筛选后股票数: {len(all_stocks)}/{original_count}", flush=True)
+
     total = len(all_stocks)
-    print(f"扫描股票数: {total}", flush=True)
+    print(f"扫描股票数(预筛选后): {total}", flush=True)
 
     signals = []
     all_signals_data = {}  # 用于行业分析
     processed = 0
     errors = 0
+    max_errors = 200  # 错误上限，防止任务无限运行
     start_time = time.time()
 
     for ts_code, name, industry in all_stocks:
         processed += 1
+
+        # 错误上限检查
+        if errors >= max_errors:
+            print(f"  错误数达到{max_errors}，停止扫描，使用已有信号", flush=True)
+            break
 
         if processed % 200 == 0:
             elapsed = time.time() - start_time
@@ -816,9 +868,12 @@ def daily_push():
 
     # 3. 全市场扫描
     print("\n[3/4] 全市场扫描潜伏信号...", flush=True)
+    print("  批量预筛选全市场行情...", flush=True)
+    prefilter_df = batch_prefilter_stocks()
     signals, all_signals_data = scan_market(
         industry_allow_matrix=None,  # 先扫描所有信号，行业过滤在后面做
         industry_map=industry_map,
+        prefilter_df=prefilter_df,
     )
 
     # 4. 行业热度分析
