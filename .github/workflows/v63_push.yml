@@ -1,0 +1,52 @@
+name: V63 Daily Push
+
+on:
+  schedule:
+    # 盘前扫描：北京时间14:30 = UTC 06:30
+    - cron: '30 6 * * 1-5'
+    # 每日推送：北京时间18:30 = UTC 10:30
+    - cron: '30 10 * * 1-5'
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  pre-market-scan:
+    if: github.event.schedule == '30 6 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run V6.3 Pre-market Scan (Mootdx)
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python -m classic_ta.v63_mootdx_push
+
+  daily-push:
+    if: github.event.schedule == '30 10 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run V6.3 Daily Push
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+        run: python classic_ta/v63_daily_push.py
