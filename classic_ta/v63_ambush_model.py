@@ -239,18 +239,9 @@ def add_micro_confirm_indicators(df: pd.DataFrame) -> pd.DataFrame:
       - micro_confirm: 综合微观确认信号
     """
     # 1. VWAP（成交量加权平均价）
-    # 典型价 × 成交量 的累计 / 成交量累计
+    # 统一用典型价近似VWAP，避免前复权后amount/vol与复权价格不可比的问题
     typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
-    tp_vol = typical_price * df["Volume"]
-    cum_tp_vol = tp_vol.cumsum()
-    cum_vol = df["Volume"].cumsum()
-    df["vwap"] = cum_tp_vol / cum_vol.replace(0, np.nan)
-    # 简化：用每日的典型价作为VWAP近似（避免跨日累计的复权问题）
-    # 实际上用当日(amount/vol)更准确
-    if "amount" in df.columns:
-        df["vwap"] = df["amount"] / df["Volume"].replace(0, np.nan)
-    else:
-        df["vwap"] = typical_price  # 回退到典型价
+    df["vwap"] = typical_price
 
     # 2. 收盘价站在VWAP之上
     df["is_above_vwap"] = df["Close"] > df["vwap"]
