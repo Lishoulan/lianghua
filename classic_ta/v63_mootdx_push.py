@@ -1,8 +1,8 @@
 """
-潜伏模型V6.3 盘前扫描推送（Mootdx版）- 含波动率平价仓位
+潜伏模型V6.3 盘前扫描推送 - 含波动率平价仓位
 ==========================================================
 基于V6.3最佳参数 + 行业动量过滤 + OAMV择时 + 微观确认 + 波动率平价仓位
-使用通达信数据源替代Tushare，解决API限流问题
+使用akshare数据源（前复权）+ 并发获取 + 批量预筛选
 
 推送内容：
   1. OAMV活跃市值择时状态
@@ -23,10 +23,12 @@ import logging
 import argparse
 import numpy as np
 import pandas as pd
+import tushare as ts
 import requests
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─── 项目路径 ───
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -88,73 +90,104 @@ def send_serverchan(title, desp):
 
 
 # ══════════════════════════════════════════════════════════
-#  Mootdx 数据获取层（使用共享模块）
+#  数据获取层（akshare优先 + tushare降级 + 并发 + 预筛选）
 # ══════════════════════════════════════════════════════════
 
-_cached_mootdx_provider_cls = None
+TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN")
 
-
-def _get_mootdx_provider():
-    """安全导入MootdxProvider，避免触发data/__init__.py（带缓存）"""
-    global _cached_mootdx_provider_cls
-    if _cached_mootdx_provider_cls is not None:
-        return _cached_mootdx_provider_cls
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "mootdx_provider",
-        str(Path(__file__).parent.parent / "data" / "mootdx_provider.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    _cached_mootdx_provider_cls = mod.MootdxProvider
-    return _cached_mootdx_provider_cls
+def _get_pro():
+    """延迟初始化tushare pro"""
+    if TUSHARE_TOKEN is None:
+        raise ValueError("TUSHARE_TOKEN环境变量未设置")
+    return ts.pro_api(TUSHARE_TOKEN)
 
 
 def get_all_a_stocks():
-    """获取全市场A股列表 —— 优先Mootdx，备用Tushare"""
+    """获取全市场A股列表 —— 优先akshare（无限流），备用tushare"""
     try:
-        MootdxProvider = _get_mootdx_provider()
-        provider = MootdxProvider()
-        stocks = provider.get_all_a_stocks()
-        if stocks:
-            return stocks
+        import akshare as ak
+        df = ak.stock_zh_a_spot_em()
+        if df is not None and len(df) > 100:
+            stocks = []
+            for _, row in df.iterrows():
+                code = str(row.get("代码", ""))
+                name = str(row.get("名称", ""))
+                if not code or name.startswith("ST") or name.startswith("*ST") or name.startswith("N"):
+                    continue
+                if code.startswith("6"):
+                    ts_code = f"{code}.SH"
+                elif code.startswith("0") or code.startswith("3"):
+                    ts_code = f"{code}.SZ"
+                else:
+                    continue
+                industry = str(row.get("行业", ""))
+                stocks.append((ts_code, name, industry))
+            if len(stocks) > 100:
+                logger.info(f"akshare获取股票列表: {len(stocks)}只")
+                return stocks
     except Exception as e:
-        logger.warning(f"Mootdx获取股票列表失败: {e}")
-    # 降级到Tushare
-    import tushare as ts
-    pro = ts.pro_api(os.getenv("TUSHARE_TOKEN"))
-    stock_basic = pro.stock_basic(exchange="", list_status="L", fields="ts_code,symbol,name,industry,list_date")
-    a_stocks = stock_basic[
-        (stock_basic["ts_code"].str.endswith(".SH"))
-        | (stock_basic["ts_code"].str.endswith(".SZ"))
-    ]
-    a_stocks = a_stocks[~a_stocks["name"].str.startswith("ST")]
-    a_stocks = a_stocks[~a_stocks["name"].str.startswith("*ST")]
-    a_stocks = a_stocks[~a_stocks["name"].str.startswith("N")]
-    a_stocks = a_stocks[a_stocks["list_date"] < "20250101"]
-    return [(row["ts_code"], row["name"], row.get("industry", "")) for _, row in a_stocks.iterrows()]
+        logger.warning(f"akshare获取股票列表失败: {e}")
+    # 降级到tushare
+    try:
+        stock_basic = _get_pro().stock_basic(exchange="", list_status="L", fields="ts_code,symbol,name,industry,list_date")
+        a_stocks = stock_basic[
+            (stock_basic["ts_code"].str.endswith(".SH"))
+            | (stock_basic["ts_code"].str.endswith(".SZ"))
+        ]
+        a_stocks = a_stocks[~a_stocks["name"].str.startswith("ST")]
+        a_stocks = a_stocks[~a_stocks["name"].str.startswith("*ST")]
+        a_stocks = a_stocks[~a_stocks["name"].str.startswith("N")]
+        a_stocks = a_stocks[a_stocks["list_date"] < "20250101"]
+        return [(row["ts_code"], row["name"], row.get("industry", "")) for _, row in a_stocks.iterrows()]
+    except Exception as e:
+        logger.warning(f"获取股票列表失败: {e}")
+        return []
 
 
 def get_stock_data(ts_code):
-    """获取单只股票日线数据 —— 优先Mootdx，备用Tushare"""
+    """获取单只股票日线数据（前复权）—— 优先akshare，备用tushare"""
     try:
-        MootdxProvider = _get_mootdx_provider()
-        provider = MootdxProvider(min_data_length=130, default_days=300)
-        df = provider.get_stock_data(ts_code)
-        if df is not None:
-            return df
+        import akshare as ak
+        symbol = ts_code.split(".")[0]
+        end_date = pd.Timestamp.now().strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
+                                start_date="20240101", end_date=end_date, adjust="qfq")
+        if df is not None and len(df) >= 130:
+            col_map = {"开盘": "Open", "最高": "High", "最低": "Low",
+                       "收盘": "Close", "成交量": "Volume"}
+            for old, new in col_map.items():
+                if old in df.columns:
+                    df[new] = df[old].astype(float)
+            if "日期" in df.columns:
+                df["Date"] = pd.to_datetime(df["日期"])
+            df.set_index("Date", inplace=True)
+            df = df.sort_index()
+            df = df[df["Volume"] > 0]
+            if not df.empty and len(df) >= 130:
+                return df
     except Exception:
         pass
-    # 降级到Tushare
-    import tushare as ts
-    pro = ts.pro_api(os.getenv("TUSHARE_TOKEN"))
+    # 降级到tushare（手动前复权）
     try:
         end_date = pd.Timestamp.now().strftime("%Y%m%d")
-        df = pro.daily(ts_code=ts_code, start_date="20240101", end_date=end_date)
-        time.sleep(0.3)
+        df = _get_pro().daily(ts_code=ts_code, start_date="20240101", end_date=end_date)
         if df is None or len(df) < 130:
             return None
-        df = df.sort_values("trade_date").reset_index(drop=True)
+        try:
+            adj = _get_pro().adj_factor(ts_code=ts_code, start_date="20240101", end_date=end_date)
+            if adj is not None and len(adj) > 0:
+                adj = adj.sort_values("trade_date").reset_index(drop=True)
+                latest_adj = adj["adj_factor"].iloc[-1]
+                adj_ratio = adj["adj_factor"].astype(float) / float(latest_adj)
+                df = df.sort_values("trade_date").reset_index(drop=True)
+                df["open"] = df["open"].astype(float) * adj_ratio
+                df["high"] = df["high"].astype(float) * adj_ratio
+                df["low"] = df["low"].astype(float) * adj_ratio
+                df["close"] = df["close"].astype(float) * adj_ratio
+            else:
+                df = df.sort_values("trade_date").reset_index(drop=True)
+        except Exception:
+            df = df.sort_values("trade_date").reset_index(drop=True)
         df["Date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
         df.set_index("Date", inplace=True)
         df["Open"] = df["open"].astype(float)
@@ -167,8 +200,63 @@ def get_stock_data(ts_code):
             return None
         return df
     except Exception:
-        time.sleep(0.5)
+        time.sleep(0.3)
         return None
+
+
+def batch_prefilter_stocks():
+    """用akshare批量获取全市场实时行情，快速预筛选"""
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_spot_em()
+        if df is None or len(df) == 0:
+            return None
+        df = df[~df["名称"].str.startswith("ST", na=False)]
+        df = df[~df["名称"].str.startswith("*ST", na=False)]
+        df = df[~df["名称"].str.startswith("N", na=False)]
+        df = df[~df["名称"].str.contains("退", na=False)]
+        if "成交量" in df.columns:
+            df = df[df["成交量"] > 0]
+        df = df[~df["代码"].str.startswith("8", na=False)]
+        df = df[~df["代码"].str.startswith("9", na=False)]
+        def to_ts_code(code):
+            code = str(code)
+            if code.startswith("6"):
+                return f"{code}.SH"
+            elif code.startswith("0") or code.startswith("3"):
+                return f"{code}.SZ"
+            return None
+        df["ts_code"] = df["代码"].apply(to_ts_code)
+        df = df[df["ts_code"].notna()]
+        if "涨跌幅" in df.columns:
+            df = df[df["涨跌幅"] < 5]
+        if "最新价" in df.columns:
+            df = df[(df["最新价"] >= 3) & (df["最新价"] <= 100)]
+        if "换手率" in df.columns:
+            df = df[df["换手率"] >= 0.5]
+        if "涨跌幅" in df.columns:
+            df = df[df["涨跌幅"] > -5]
+        logger.info(f"批量预筛选: {len(df)}只（排除ST/停牌/北交所/已大涨/极端价格/低换手）")
+        return df
+    except Exception as e:
+        logger.warning(f"批量预筛选失败: {e}")
+        return None
+
+
+def _fetch_and_process_one(ts_code, name, industry, best_params):
+    """获取单只股票数据并计算指标，返回 (ts_code, name, industry, df_or_None)"""
+    try:
+        df = get_stock_data(ts_code)
+        if df is None:
+            return (ts_code, name, industry, None)
+        df = IndicatorCalcBase(df)
+        df = add_micro_confirm_indicators(df)
+        df = Detect_AmbushSignal_V63(df, best_params)
+        if df is None or len(df) < 130:
+            return (ts_code, name, industry, None)
+        return (ts_code, name, industry, df)
+    except Exception:
+        return (ts_code, name, industry, None)
 
 
 # ══════════════════════════════════════════════════════════
@@ -178,13 +266,12 @@ def get_stock_data(ts_code):
 def get_oamv_status():
     """获取OAMV活跃市值当前状态"""
     from ml_strategy.oamv_filter import OAMVHysteresisFilter
-    import tushare as ts
 
-    pro = ts.pro_api(os.getenv("TUSHARE_TOKEN"))
     end_date = pd.Timestamp.now().strftime("%Y%m%d")
     start_date = (pd.Timestamp.now() - pd.Timedelta(days=365)).strftime("%Y%m%d")
 
     try:
+        pro = _get_pro()
         index_df = pro.index_daily(ts_code="000300.SH", start_date=start_date, end_date=end_date)
         if index_df is None or len(index_df) < 40:
             return None
@@ -427,8 +514,8 @@ def analyze_signal_detail(df, signal_idx):
 #  全市场扫描
 # ══════════════════════════════════════════════════════════
 
-def scan_market(max_stocks=None, industry_allow_matrix=None, industry_map=None):
-    """全市场扫描潜伏信号（含行业热度过滤）"""
+def scan_market(max_stocks=None, industry_allow_matrix=None, industry_map=None, prefilter_df=None):
+    """全市场扫描潜伏信号（并发获取数据）"""
     all_stocks = get_all_a_stocks()
     if not all_stocks:
         logger.error("无法获取股票列表")
@@ -437,8 +524,15 @@ def scan_market(max_stocks=None, industry_allow_matrix=None, industry_map=None):
     if max_stocks:
         all_stocks = all_stocks[:max_stocks]
 
+    # 使用批量预筛选结果过滤股票列表
+    if prefilter_df is not None:
+        prefilter_codes = set(prefilter_df["ts_code"].tolist())
+        original_count = len(all_stocks)
+        all_stocks = [(tc, n, ind) for tc, n, ind in all_stocks if tc in prefilter_codes]
+        logger.info(f"预筛选后股票数: {len(all_stocks)}/{original_count}")
+
     total = len(all_stocks)
-    logger.info(f"扫描股票数: {total}")
+    logger.info(f"扫描股票数(预筛选后): {total} | 并发数: 10")
 
     signals = []
     all_signals_data = {}
@@ -446,84 +540,85 @@ def scan_market(max_stocks=None, industry_allow_matrix=None, industry_map=None):
     errors = 0
     start_time = time.time()
 
-    for ts_code, name, industry in all_stocks:
-        processed += 1
+    # 并发获取数据（10个线程）
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {}
+        for ts_code, name, industry in all_stocks:
+            future = executor.submit(_fetch_and_process_one, ts_code, name, industry, BEST_PARAMS)
+            futures[future] = (ts_code, name, industry)
 
-        if processed % 200 == 0:
-            elapsed = time.time() - start_time
-            eta = elapsed / processed * (total - processed) if processed > 0 else 0
-            logger.info(f"进度: {processed}/{total} ({processed/total*100:.1f}%) | "
-                        f"信号:{len(signals)} | 失败:{errors} | ETA:{eta:.0f}s")
+        for future in as_completed(futures):
+            ts_code, name, industry = futures[future]
+            processed += 1
 
-        df = get_stock_data(ts_code)
-        if df is None:
-            errors += 1
-            continue
+            if processed % 200 == 0:
+                elapsed = time.time() - start_time
+                eta = elapsed / processed * (total - processed) if processed > 0 else 0
+                logger.info(f"进度: {processed}/{total} ({processed/total*100:.1f}%) | "
+                            f"信号:{len(signals)} | 失败:{errors} | ETA:{eta:.0f}s")
 
-        try:
-            df = IndicatorCalcBase(df)
-            df = add_micro_confirm_indicators(df)
-            df = Detect_AmbushSignal_V63(df, BEST_PARAMS)
-        except Exception:
-            errors += 1
-            continue
-
-        if df is None or len(df) < 130:
-            errors += 1
-            continue
-
-        # 保存用于行业分析
-        all_signals_data[ts_code] = df
-
-        latest = df.iloc[-1]
-        if pd.isna(latest.get("yellow_line")) or pd.isna(latest.get("white_line")):
-            continue
-
-        if latest.get("ambush_signal", False):
-            # V6.3：行业热度过滤
-            signal_date = df.index[-1]
-            ind_allowed = True
-            if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
-                try:
-                    ind_val = industry_allow_matrix[industry].reindex([signal_date])
-                    if not ind_val.empty and not ind_val.iloc[0]:
-                        ind_allowed = False
-                except Exception:
-                    pass
-
-            if not ind_allowed:
+            try:
+                result_ts_code, result_name, result_industry, df = future.result()
+            except Exception:
+                errors += 1
                 continue
 
-            prev = df.iloc[-2]
-            change_pct = (latest["Close"] - prev["Close"]) / prev["Close"] * 100
-            vol_ratio = latest["Volume"] / latest["volume_ma"] if latest["volume_ma"] > 0 else 0
+            if df is None:
+                errors += 1
+                continue
 
-            detail = analyze_signal_detail(df, len(df) - 1)
+            # 保存用于行业分析
+            all_signals_data[ts_code] = df
 
-            window = BEST_PARAMS["ambush_window"]
-            sos_dates = []
-            for j in range(max(0, len(df) - window), len(df)):
-                if df.iloc[j].get("tag_sos_anchor", False):
-                    sos_dates.append(df.index[j].strftime("%m-%d"))
+            latest = df.iloc[-1]
+            if pd.isna(latest.get("yellow_line")) or pd.isna(latest.get("white_line")):
+                continue
 
-            signal_info = {
-                "code": ts_code,
-                "name": name,
-                "industry": industry,
-                "price": round(float(latest["Close"]), 2),
-                "change_pct": round(float(change_pct), 2),
-                "white_line": round(float(latest["white_line"]), 2),
-                "yellow_line": round(float(latest["yellow_line"]), 2),
-                "J": round(float(latest["J"]), 1),
-                "atr14": round(float(latest["atr14"]), 2),
-                "vol_ratio": round(float(vol_ratio), 2),
-                "sos_dates": sos_dates,
-                "analysis": detail,
-                "signal_date": signal_date.strftime("%Y-%m-%d"),
-            }
-            signals.append(signal_info)
-            logger.info(f"潜伏信号: {name}({ts_code}) [{industry}] {latest['Close']:.2f} "
-                        f"{change_pct:+.2f}% J:{latest['J']:.1f} 量比:{vol_ratio:.2f}")
+            if latest.get("ambush_signal", False):
+                # V6.3：行业热度过滤
+                signal_date = df.index[-1]
+                ind_allowed = True
+                if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
+                    try:
+                        ind_val = industry_allow_matrix[industry].reindex([signal_date])
+                        if not ind_val.empty and not ind_val.iloc[0]:
+                            ind_allowed = False
+                    except Exception:
+                        pass
+
+                if not ind_allowed:
+                    continue
+
+                prev = df.iloc[-2]
+                change_pct = (latest["Close"] - prev["Close"]) / prev["Close"] * 100
+                vol_ratio = latest["Volume"] / latest["volume_ma"] if latest["volume_ma"] > 0 else 0
+
+                detail = analyze_signal_detail(df, len(df) - 1)
+
+                window = BEST_PARAMS["ambush_window"]
+                sos_dates = []
+                for j in range(max(0, len(df) - window), len(df)):
+                    if df.iloc[j].get("tag_sos_anchor", False):
+                        sos_dates.append(df.index[j].strftime("%m-%d"))
+
+                signal_info = {
+                    "code": ts_code,
+                    "name": name,
+                    "industry": industry,
+                    "price": round(float(latest["Close"]), 2),
+                    "change_pct": round(float(change_pct), 2),
+                    "white_line": round(float(latest["white_line"]), 2),
+                    "yellow_line": round(float(latest["yellow_line"]), 2),
+                    "J": round(float(latest["J"]), 1),
+                    "atr14": round(float(latest["atr14"]), 2),
+                    "vol_ratio": round(float(vol_ratio), 2),
+                    "sos_dates": sos_dates,
+                    "analysis": detail,
+                    "signal_date": signal_date.strftime("%Y-%m-%d"),
+                }
+                signals.append(signal_info)
+                logger.info(f"潜伏信号: {name}({ts_code}) [{industry}] {latest['Close']:.2f} "
+                            f"{change_pct:+.2f}% J:{latest['J']:.1f} 量比:{vol_ratio:.2f}")
 
     elapsed = time.time() - start_time
     logger.info(f"扫描完成! 耗时: {elapsed/60:.1f}min | 信号: {len(signals)}只 | 错误: {errors}")
@@ -541,7 +636,7 @@ def build_push_message(oamv_status, signals, industry_stats):
     parts = []
     parts.append("## 潜伏模型V6.3 盘前扫描推送")
     parts.append(f"**日期**: {today}")
-    parts.append(f"**数据源**: 通达信(Mootdx)")
+    parts.append(f"**数据源**: akshare(前复权)")
     parts.append("")
     parts.append("---")
     parts.append("")
@@ -697,21 +792,22 @@ def daily_push(max_stocks=None):
     # 2. 获取行业分类
     logger.info("[2/4] 获取行业分类...")
     try:
-        import tushare as ts
-        pro = ts.pro_api(os.getenv("TUSHARE_TOKEN"))
-        basic = pro.stock_basic(fields="ts_code,industry", list_status="L")
+        basic = _get_pro().stock_basic(fields="ts_code,industry", list_status="L")
         industry_map = dict(zip(basic["ts_code"], basic["industry"]))
         logger.info(f"  行业映射: {len(industry_map)}只股票")
     except Exception as e:
         logger.warning(f"  行业分类获取失败: {e}")
         industry_map = {}
 
-    # 3. 全市场扫描（先不过滤行业，扫描完再做行业分析）
+    # 3. 全市场扫描
     logger.info("[3/4] 全市场扫描潜伏信号...")
+    logger.info("  批量预筛选全市场行情...")
+    prefilter_df = batch_prefilter_stocks()
     signals, all_signals_data = scan_market(
         max_stocks=max_stocks,
         industry_allow_matrix=None,
         industry_map=industry_map,
+        prefilter_df=prefilter_df,
     )
 
     # 4. 行业热度分析 + 行业过滤
@@ -750,7 +846,7 @@ def daily_push(max_stocks=None):
     result = {
         "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "version": "V6.3",
-        "data_source": "mootdx",
+        "data_source": "akshare",
         "oamv_status": oamv_status,
         "signal_count": len(signals),
         "signals": signals,
