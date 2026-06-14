@@ -1,4 +1,6 @@
 .env
+.trae/
+.qoder/
 __pycache__/
 *.pyc
 *.pyo
