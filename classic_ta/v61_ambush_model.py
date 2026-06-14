@@ -118,10 +118,11 @@ def Detect_AmbushSignal_V61(df: pd.DataFrame, params: Dict[str, Any] = None) -> 
 # ╚══════════════════════════════════════════════════════════════╝
 
 class ExitReason(Enum):
-    """4级退出枚举"""
+    """退出枚举"""
     ATR_HARD_STOP = auto()       # 优先级1：硬止损
     CHANDELIER_EXIT = auto()      # 优先级2：吊灯止盈
     BUY_CLIMAX = auto()          # 优先级3：Buy Climax
+    VPA_DISTRIBUTION = auto()    # 优先级3.5：VPA派发信号
     TIME_STOP = auto()           # 优先级4：时间止损/超时平仓
 
     @property
@@ -130,6 +131,7 @@ class ExitReason(Enum):
             ExitReason.ATR_HARD_STOP: "硬止损",
             ExitReason.CHANDELIER_EXIT: "吊灯止盈",
             ExitReason.BUY_CLIMAX: "抢购高潮",
+            ExitReason.VPA_DISTRIBUTION: "VPA派发",
             ExitReason.TIME_STOP: "时间止损",
         }[self]
 

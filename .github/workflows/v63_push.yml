@@ -2,15 +2,15 @@ name: V63 Daily Push
 
 on:
   schedule:
-    # 盘前扫描：北京时间14:30 = UTC 06:30
-    - cron: '30 6 * * 1-5'
-    # 每日推送：北京时间18:30 = UTC 10:30
-    - cron: '30 10 * * 1-5'
+    # 盘前扫描：北京时间14:30 = UTC 06:30（每天）
+    - cron: '30 6 * * *'
+    # 每日推送：北京时间18:30 = UTC 10:30（每天）
+    - cron: '30 10 * * *'
   workflow_dispatch: # 支持手动触发
 
 jobs:
   pre-market-scan:
-    if: github.event.schedule == '30 6 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '30 6 * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +20,16 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+
+      - name: Cache stock data & OAMV cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            results/stock_cache
+            results/oamv_cache
+          key: stock-cache-v1-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            stock-cache-v1-${{ runner.os }}-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -31,7 +41,7 @@ jobs:
         run: python -m classic_ta.v63_mootdx_push
 
   daily-push:
-    if: github.event.schedule == '30 10 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '30 10 * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +51,16 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+
+      - name: Cache stock data & OAMV cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            results/stock_cache
+            results/oamv_cache
+          key: stock-cache-v1-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            stock-cache-v1-${{ runner.os }}-
 
       - name: Install dependencies
         run: pip install -r requirements.txt

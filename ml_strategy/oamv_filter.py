@@ -8,15 +8,22 @@ warnings.filterwarnings('ignore')
 
 class OAMVHysteresisFilter:
 
-    def __init__(self, upper_threshold=4.0, lower_threshold=-2.3,
-                 cost_ma_period=34, roc_period=1,
-                 weekly_ema_period=5, weekly_use_ema=True):
+    def __init__(self, upper_threshold=2.0, lower_threshold=-1.0,
+                 cost_ma_period=42, roc_period=1,
+                 weekly_ema_period=5, weekly_use_ema=True,
+                 smooth_method='sma', smooth_period=15,
+                 cost_ma_method='sma'):
         self.upper_threshold = upper_threshold
         self.lower_threshold = lower_threshold
         self.cost_ma_period = cost_ma_period
         self.roc_period = roc_period
         self.weekly_ema_period = weekly_ema_period
         self.weekly_use_ema = weekly_use_ema
+        # 平滑方式: 'hybrid'=0.6*MA5+0.4*MA20, 'ema'=EMA(smooth_period), 'sma'=SMA(smooth_period), 'none'=不做平滑
+        self.smooth_method = smooth_method
+        self.smooth_period = smooth_period
+        # cost_ma方式: 'sma'=简单移动平均, 'ema'=指数移动平均
+        self.cost_ma_method = cost_ma_method
         self.state_series = None
         self.x_series = None
         self.oamv_smooth = None
@@ -25,6 +32,28 @@ class OAMVHysteresisFilter:
         self.weekly_x_series = None
         self.weekly_cost_ma = None
         self.data_source = 'proxy'
+
+    def _apply_smoothing(self, raw_series):
+        """对原始序列应用平滑"""
+        if self.smooth_method == 'hybrid':
+            ma5 = raw_series.rolling(window=5, min_periods=5).mean()
+            ma20 = raw_series.rolling(window=20, min_periods=20).mean()
+            return 0.6 * ma5 + 0.4 * ma20
+        elif self.smooth_method == 'ema':
+            return raw_series.ewm(span=self.smooth_period, adjust=False).mean()
+        elif self.smooth_method == 'sma':
+            return raw_series.rolling(window=self.smooth_period, min_periods=self.smooth_period).mean()
+        elif self.smooth_method == 'none':
+            return raw_series.copy()
+        else:
+            raise ValueError(f"Unknown smooth_method: {self.smooth_method}")
+
+    def _apply_cost_ma(self, smooth_series):
+        """对平滑后序列计算成本均线"""
+        if self.cost_ma_method == 'ema':
+            return smooth_series.ewm(span=self.cost_ma_period, adjust=False).mean()
+        else:
+            return smooth_series.rolling(window=self.cost_ma_period, min_periods=self.cost_ma_period).mean()
 
     def compute_oamv_proxy(self, index_df):
         df = index_df.copy()
@@ -35,11 +64,8 @@ class OAMVHysteresisFilter:
         else:
             raise ValueError("Need 'amount' or 'Volume'+'Close' columns")
 
-        oamv_ma5 = oamv.rolling(window=5, min_periods=5).mean()
-        oamv_ma20 = oamv.rolling(window=20, min_periods=20).mean()
-        oamv_smooth = 0.6 * oamv_ma5 + 0.4 * oamv_ma20
-
-        cost_ma = oamv_smooth.rolling(window=self.cost_ma_period, min_periods=self.cost_ma_period).mean()
+        oamv_smooth = self._apply_smoothing(oamv)
+        cost_ma = self._apply_cost_ma(oamv_smooth)
         x_t = (oamv_smooth - cost_ma) / cost_ma * 100.0
 
         return x_t, oamv_smooth, cost_ma
@@ -63,11 +89,8 @@ class OAMVHysteresisFilter:
         else:
             raise ValueError("Need total_mv+turnover_rate_f or circ_mv+turnover_rate_f or amount")
 
-        oamv_ma5 = live_chips.rolling(window=5, min_periods=5).mean()
-        oamv_ma20 = live_chips.rolling(window=20, min_periods=20).mean()
-        oamv_smooth = 0.6 * oamv_ma5 + 0.4 * oamv_ma20
-
-        cost_ma = oamv_smooth.rolling(window=self.cost_ma_period, min_periods=self.cost_ma_period).mean()
+        oamv_smooth = self._apply_smoothing(live_chips)
+        cost_ma = self._apply_cost_ma(oamv_smooth)
         x_t = (oamv_smooth - cost_ma) / cost_ma * 100.0
 
         return x_t, oamv_smooth, cost_ma
@@ -128,11 +151,20 @@ class OAMVHysteresisFilter:
                         if pd.notna(vol) and pd.notna(close):
                             universe_amv.loc[date] += float(vol * close)
 
-        oamv_ma5 = universe_amv.rolling(window=5, min_periods=5).mean()
-        oamv_ma20 = universe_amv.rolling(window=20, min_periods=20).mean()
-        oamv_smooth = 0.6 * oamv_ma5 + 0.4 * oamv_ma20
+        oamv_smooth = self._apply_smoothing(universe_amv)
+        cost_ma = self._apply_cost_ma(oamv_smooth)
+        x_t = (oamv_smooth - cost_ma) / cost_ma * 100.0
 
-        cost_ma = oamv_smooth.rolling(window=self.cost_ma_period, min_periods=self.cost_ma_period).mean()
+        return x_t, oamv_smooth, cost_ma
+
+    def compute_oamv_from_series(self, amv_series):
+        """从预计算的活跃市值时间序列直接计算OAMV
+
+        参数:
+            amv_series: pd.Series, 索引为日期, 值为全市场活跃市值(circ_mv*turnover_rate/100)
+        """
+        oamv_smooth = self._apply_smoothing(amv_series)
+        cost_ma = self._apply_cost_ma(oamv_smooth)
         x_t = (oamv_smooth - cost_ma) / cost_ma * 100.0
 
         return x_t, oamv_smooth, cost_ma
@@ -206,8 +238,12 @@ class OAMVHysteresisFilter:
 
         return state
 
-    def fit(self, index_df, daily_basic_df=None, all_stock_data=None, daily_basic_cache=None):
-        if all_stock_data is not None:
+    def fit(self, index_df=None, daily_basic_df=None, all_stock_data=None, daily_basic_cache=None,
+            amv_series=None):
+        if amv_series is not None:
+            self.x_series, self.oamv_smooth, self.cost_ma = self.compute_oamv_from_series(amv_series)
+            self.data_source = 'universe_cached'
+        elif all_stock_data is not None:
             self.x_series, self.oamv_smooth, self.cost_ma = self.compute_oamv_universe(
                 all_stock_data, daily_basic_cache)
         elif daily_basic_df is not None:

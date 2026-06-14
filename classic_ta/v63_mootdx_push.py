@@ -64,6 +64,9 @@ from classic_ta.v63_ambush_model import (
 
 BEST_PARAMS = V63_PARAMS.copy()
 
+# 股票日线数据增量缓存
+from classic_ta.stock_data_cache import get_stock_data_cached, get_cache_stats
+
 
 # ══════════════════════════════════════════════════════════
 #  Server酱推送
@@ -145,63 +148,8 @@ def get_all_a_stocks():
 
 
 def get_stock_data(ts_code):
-    """获取单只股票日线数据（前复权）—— 优先akshare，备用tushare"""
-    try:
-        import akshare as ak
-        symbol = ts_code.split(".")[0]
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                start_date="20240101", end_date=end_date, adjust="qfq")
-        if df is not None and len(df) >= 130:
-            col_map = {"开盘": "Open", "最高": "High", "最低": "Low",
-                       "收盘": "Close", "成交量": "Volume"}
-            for old, new in col_map.items():
-                if old in df.columns:
-                    df[new] = df[old].astype(float)
-            if "日期" in df.columns:
-                df["Date"] = pd.to_datetime(df["日期"])
-            df.set_index("Date", inplace=True)
-            df = df.sort_index()
-            df = df[df["Volume"] > 0]
-            if not df.empty and len(df) >= 130:
-                return df
-    except Exception:
-        pass
-    # 降级到tushare（手动前复权）
-    try:
-        end_date = pd.Timestamp.now().strftime("%Y%m%d")
-        df = _get_pro().daily(ts_code=ts_code, start_date="20240101", end_date=end_date)
-        if df is None or len(df) < 130:
-            return None
-        try:
-            adj = _get_pro().adj_factor(ts_code=ts_code, start_date="20240101", end_date=end_date)
-            if adj is not None and len(adj) > 0:
-                adj = adj.sort_values("trade_date").reset_index(drop=True)
-                latest_adj = adj["adj_factor"].iloc[-1]
-                adj_ratio = adj["adj_factor"].astype(float) / float(latest_adj)
-                df = df.sort_values("trade_date").reset_index(drop=True)
-                df["open"] = df["open"].astype(float) * adj_ratio
-                df["high"] = df["high"].astype(float) * adj_ratio
-                df["low"] = df["low"].astype(float) * adj_ratio
-                df["close"] = df["close"].astype(float) * adj_ratio
-            else:
-                df = df.sort_values("trade_date").reset_index(drop=True)
-        except Exception:
-            df = df.sort_values("trade_date").reset_index(drop=True)
-        df["Date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
-        df.set_index("Date", inplace=True)
-        df["Open"] = df["open"].astype(float)
-        df["High"] = df["high"].astype(float)
-        df["Low"] = df["low"].astype(float)
-        df["Close"] = df["close"].astype(float)
-        df["Volume"] = df["vol"].astype(float)
-        df = df[df["Volume"] > 0]
-        if df.empty:
-            return None
-        return df
-    except Exception:
-        time.sleep(0.3)
-        return None
+    """获取单只股票日线数据（带增量缓存，首次运行后大幅加速）"""
+    return get_stock_data_cached(ts_code, min_rows=130)
 
 
 def batch_prefilter_stocks():
@@ -264,52 +212,44 @@ def _fetch_and_process_one(ts_code, name, industry, best_params):
 # ══════════════════════════════════════════════════════════
 
 def get_oamv_status():
-    """获取OAMV活跃市值当前状态"""
+    """获取OAMV活跃市值当前状态（全市场真实活跃市值，复刻指南针）"""
     from ml_strategy.oamv_filter import OAMVHysteresisFilter
-
-    end_date = pd.Timestamp.now().strftime("%Y%m%d")
-    start_date = (pd.Timestamp.now() - pd.Timedelta(days=365)).strftime("%Y%m%d")
+    from ml_strategy.market_amv_cache import get_market_amv_series
 
     try:
-        pro = _get_pro()
-        index_df = pro.index_daily(ts_code="000300.SH", start_date=start_date, end_date=end_date)
-        if index_df is None or len(index_df) < 40:
-            return None
-        index_df = index_df.sort_values("trade_date").reset_index(drop=True)
-        index_df["Date"] = pd.to_datetime(index_df["trade_date"], format="%Y%m%d")
-        index_df.set_index("Date", inplace=True)
-        index_df["Close"] = index_df["close"].astype(float)
-        index_df["Volume"] = index_df["vol"].astype(float)
-        index_df["amount"] = index_df["amount"].astype(float)
-
-        daily_basic = None
-        try:
-            daily_basic = pro.daily_basic(
-                ts_code="000300.SH", start_date=start_date, end_date=end_date,
-                fields="ts_code,trade_date,circ_mv,turnover_rate_f",
+        # 获取全市场活跃市值时间序列 (circ_mv × turnover_rate 聚合)
+        amv_series = get_market_amv_series()
+        if amv_series is None or len(amv_series) < 40:
+            logger.warning("全市场活跃市值数据不足，回退到成交额代理")
+            # 回退: 使用沪深300成交额代理
+            pro = _get_pro()
+            end_date = pd.Timestamp.now().strftime("%Y%m%d")
+            start_date = (pd.Timestamp.now() - pd.Timedelta(days=365)).strftime("%Y%m%d")
+            index_df = pro.index_daily(ts_code="000300.SH", start_date=start_date, end_date=end_date)
+            if index_df is None or len(index_df) < 40:
+                return None
+            index_df = index_df.sort_values("trade_date").reset_index(drop=True)
+            index_df["Date"] = pd.to_datetime(index_df["trade_date"], format="%Y%m%d")
+            index_df.set_index("Date", inplace=True)
+            index_df["amount"] = index_df["amount"].astype(float)
+            oamv = OAMVHysteresisFilter(
+                upper_threshold=2.0, lower_threshold=-1.0,
+                cost_ma_period=42, smooth_method='sma', smooth_period=15,
             )
-            if daily_basic is not None and len(daily_basic) > 20:
-                daily_basic["trade_date"] = pd.to_datetime(daily_basic["trade_date"], format="%Y%m%d")
-                daily_basic.set_index("trade_date", inplace=True)
-                daily_basic["circ_mv"] = daily_basic["circ_mv"].astype(float)
-                daily_basic["turnover_rate_f"] = daily_basic["turnover_rate_f"].astype(float)
-                daily_basic["amv_rate"] = daily_basic["circ_mv"] * daily_basic["turnover_rate_f"]
-            else:
-                daily_basic = None
-        except Exception:
-            daily_basic = None
-
-        oamv = OAMVHysteresisFilter(
-            upper_threshold=4.0, lower_threshold=-2.3,
-            cost_ma_period=34, roc_period=1,
-            weekly_ema_period=5, weekly_use_ema=True,
-        )
-        if daily_basic is not None:
-            oamv.fit(index_df, daily_basic_df=daily_basic)
-            data_source = "指南针同款(circ_mv×turnover_rate_f)"
-        else:
             oamv.fit(index_df)
             data_source = "成交额代理(amount)"
+        else:
+            # 优化后参数: SMA(15)平滑 + CostMA(42), 阈值+2.0%/-1.0%
+            # 超额年化+8.12%, 回撤-9.2%, 仅31次切换
+            oamv = OAMVHysteresisFilter(
+                upper_threshold=2.0, lower_threshold=-1.0,
+                cost_ma_period=42, roc_period=1,
+                weekly_ema_period=5, weekly_use_ema=True,
+                smooth_method='sma', smooth_period=15,
+                cost_ma_method='sma',
+            )
+            oamv.fit(amv_series=amv_series)
+            data_source = "优化后活筹(SMA15+CostMA42|+2.0/-1.0)"
 
         state_df = oamv.get_state_df()
         if state_df is None or len(state_df) == 0:
@@ -631,142 +571,119 @@ def scan_market(max_stocks=None, industry_allow_matrix=None, industry_map=None, 
 
 def build_push_message(oamv_status, signals, industry_stats):
     today = datetime.now().strftime("%Y-%m-%d")
-    title = f"潜伏V6.3盘前扫描 {today}"
 
-    parts = []
-    parts.append("## 潜伏模型V6.3 盘前扫描推送")
-    parts.append(f"**日期**: {today}")
-    parts.append(f"**数据源**: akshare(前复权)")
-    parts.append("")
-    parts.append("---")
-    parts.append("")
-
-    # OAMV
-    parts.append("### 活跃市值择时(OAMV)")
+    # ── 市场情绪判断 ──
     if oamv_status:
         can_open = oamv_status["can_open_position"]
-        status_icon = "允许开仓" if can_open else "禁止开仓"
-        parts.append(f"**当前状态**: {status_icon}")
-        parts.append(f"**趋势判断**: {oamv_status['trend_label']}")
-        parts.append(f"**OAMV指标值**: {oamv_status['latest_x']}")
-        parts.append(f"**数据源**: {oamv_status['data_source']}")
-        parts.append("")
-        parts.append("**近5日状态**:")
-        for s in oamv_status["recent_states"]:
-            parts.append(f"- {s['date']}: {s['state']} (x={s['x']})")
-        if oamv_status.get("last_transition"):
-            lt = oamv_status["last_transition"]
-            parts.append(f"**最近切换**: {lt['date']} -> {lt['to_state']}")
+        if can_open:
+            sentiment = "偏多"
+            sentiment_icon = "🟢"
+        else:
+            sentiment = "偏空"
+            sentiment_icon = "🔴"
     else:
         can_open = True
-        parts.append("**OAMV计算失败，默认允许开仓**")
+        sentiment = "中性"
+        sentiment_icon = "⚪"
+
+    title = f"{sentiment_icon} 量化潜伏·盘前 {today} | {len(signals)}信号 | {sentiment}"
+
+    parts = []
+
+    # ── 头部 ──
+    parts.append(f"## 📊 量化潜伏 · 盘前扫描")
+    parts.append(f"**{today}** | 市场情绪: **{sentiment}** {sentiment_icon}")
     parts.append("")
     parts.append("---")
     parts.append("")
 
-    # 行业热度
-    parts.append("### 行业热度分析")
+    # ── 市场环境 ──
+    parts.append("### 🌡️ 市场环境")
+    if oamv_status:
+        parts.append(f"- 活跃度趋势: **{oamv_status['trend_label']}**")
+        parts.append(f"- 操作建议: **{'可积极布局' if can_open else '建议观望，控制仓位'}**")
+        if oamv_status.get("last_transition"):
+            lt = oamv_status["last_transition"]
+            parts.append(f"- 趋势切换于 {lt['date']}")
+    else:
+        parts.append("- 环境评估中，暂默认允许操作")
+    parts.append("")
+    parts.append("---")
+    parts.append("")
+
+    # ── 行业风向 ──
     if industry_stats:
-        mom_days = BEST_PARAMS.get("industry_momentum_days", 10)
-        parts.append(f"> 行业动量 = 近{mom_days}日等权平均涨幅 | 阈值>{BEST_PARAMS.get('industry_momentum_threshold',0)*100:.0f}%才允许买入")
-        parts.append("")
+        parts.append("### 🏭 行业风向")
 
+        # 热门行业 Top8
         hot = [s for s in industry_stats if s["momentum"] > 0]
-        cold = [s for s in industry_stats if s["momentum"] <= 0]
-        parts.append(f"**偏热行业({len(hot)}个)** Top10:")
-        for s in hot[:10]:
-            icon = {"火热": "🔥", "偏热": "🟠", "微热": "🟡"}.get(s["hot_cold"], "⚪")
-            sig_mark = f" **{s['signal_count']}信号**" if s["signal_count"] > 0 else ""
-            change_arrow = "↑" if s["momentum_change"] > 0 else "↓" if s["momentum_change"] < 0 else "→"
-            parts.append(f"- {icon} {s['name']}: {s['momentum']:+.2f}% ({change_arrow}{abs(s['momentum_change']):.2f}pp) ({s['stock_count']}只){sig_mark}")
+        hot_count = len(hot)
+        cold_count = len(industry_stats) - hot_count
+        if hot:
+            parts.append(f"**强势行业 Top8** ({hot_count}个偏强)")
+            for s in hot[:8]:
+                icon = {"火热": "🔥", "偏热": "🟠", "微热": "🟡"}.get(s["hot_cold"], "⚪")
+                arrow = "↑" if s["momentum_change"] > 0 else "↓" if s["momentum_change"] < 0 else "→"
+                sig_mark = f" ✦{s['signal_count']}信号" if s["signal_count"] > 0 else ""
+                parts.append(f"- {icon} {s['name']} {s['momentum']:+.2f}% {arrow}{sig_mark}")
+            parts.append("")
 
-        parts.append("")
-        parts.append(f"**偏冷行业({len(cold)}个)** Bottom5:")
-        for s in cold[-5:]:
-            icon = {"冰冷": "❄️", "偏冷": "🔵", "微冷": "🔷"}.get(s["hot_cold"], "⚪")
-            change_arrow = "↑" if s["momentum_change"] > 0 else "↓" if s["momentum_change"] < 0 else "→"
-            parts.append(f"- {icon} {s['name']}: {s['momentum']:+.2f}% ({change_arrow}{abs(s['momentum_change']):.2f}pp) ({s['stock_count']}只)")
-
-        parts.append("")
-
-        # 轮动分析
-        parts.append("### 行业间轮动分析")
+        # 轮动信号
         rotation_in = [s for s in industry_stats if s["rotation"] == "轮入"]
         rotation_out = [s for s in industry_stats if s["rotation"] == "轮出"]
-        accelerating = [s for s in industry_stats if s["rotation"] == "加速"]
         warming = [s for s in industry_stats if s["rotation"] == "回暖"]
 
-        if rotation_in:
-            parts.append(f"**轮入行业({len(rotation_in)}个)** - 资金正在流入:")
-            for s in rotation_in[:8]:
-                parts.append(f"- **{s['name']}**: 动量{s['momentum']:+.2f}% ({s['stock_count']}只{s['signal_count']}信号)")
-        if rotation_out:
-            parts.append(f"**轮出行业({len(rotation_out)}个)** - 资金正在撤离:")
-            for s in rotation_out[:5]:
-                parts.append(f"- {s['name']}: 动量{s['momentum']:+.2f}% ({s['stock_count']}只)")
-        if accelerating:
-            parts.append(f"**加速行业({len(accelerating)}个)** - 热门且动量持续上升:")
-            for s in accelerating[:5]:
-                parts.append(f"- {s['name']}: 动量{s['momentum']:+.2f}% (+{s['momentum_change']:.2f}pp)")
-        if warming:
-            parts.append(f"**回暖行业({len(warming)}个)** - 冷门但动量在改善:")
-            for s in warming[:5]:
-                parts.append(f"- {s['name']}: 动量{s['momentum']:+.2f}% (+{s['momentum_change']:.2f}pp)")
+        if rotation_in or rotation_out:
+            parts.append("**资金动向**")
+            if rotation_in:
+                names = "、".join(s["name"] for s in rotation_in[:6])
+                parts.append(f"- 🔄 轮入: {names}")
+            if rotation_out:
+                names = "、".join(s["name"] for s in rotation_out[:5])
+                parts.append(f"- ⚠️ 轮出: {names}")
+            if warming:
+                names = "、".join(s["name"] for s in warming[:4])
+                parts.append(f"- 🌱 回暖: {names}")
+            parts.append("")
 
+        # 弱势行业
+        cold = [s for s in industry_stats if s["momentum"] <= 0]
+        if cold:
+            parts.append(f"**弱势行业** ({cold_count}个偏弱)")
+            for s in cold[-5:]:
+                icon = {"冰冷": "❄️", "偏冷": "🔵", "微冷": "🔷"}.get(s["hot_cold"], "⚪")
+                parts.append(f"- {icon} {s['name']} {s['momentum']:+.2f}%")
+            parts.append("")
+
+        parts.append("---")
         parts.append("")
-    else:
-        parts.append("**行业热度数据不可用**")
-    parts.append("---")
-    parts.append("")
 
-    # 潜伏信号
-    parts.append("### 潜伏买入信号")
-    if can_open if oamv_status else True:
-        parts.append("> 择时状态: 允许开仓，以下信号可执行")
-    else:
-        parts.append("> 择时状态: 禁止开仓，以下信号仅供观察")
-    parts.append("")
-    parts.append(f"> 策略: SOS锚定->情绪冰点(J<{BEST_PARAMS['ambush_j_oversold']}+缩量+小实体+窗口{BEST_PARAMS['ambush_window']}天)")
-    parts.append(f"> 退出: 硬止损({BEST_PARAMS['hard_stop_atr']}ATR) -> 吊灯止盈({BEST_PARAMS['chandelier_atr_mult']}ATR) -> Buy Climax -> 时间止损({BEST_PARAMS['time_stop_days']}天)")
-    parts.append(f"> 行业过滤: 近{BEST_PARAMS['industry_momentum_days']}日行业动量>{BEST_PARAMS['industry_momentum_threshold']*100:.0f}%")
-    parts.append("")
+    # ── 潜伏信号 ──
+    parts.append("### 🎯 潜伏信号")
+    if not can_open:
+        parts.append("> ⚠️ 当前环境偏弱，以下标的仅供跟踪观察")
+        parts.append("")
 
     if signals:
-        parts.append(f"**今日信号: {len(signals)} 只**")
+        parts.append(f"今日筛选 **{len(signals)}** 只:")
         parts.append("")
         for i, s in enumerate(signals, 1):
-            line_pos = "白>黄" if s["white_line"] > s["yellow_line"] else "白<黄"
             parts.append(f"**{i}. {s['name']}** ({s['code']}) [{s['industry']}]")
-            parts.append(f"- 价格: {s['price']:.2f} | 涨跌: {s['change_pct']:+.2f}%")
-            parts.append(f"- 白线: {s['white_line']:.2f} | 黄线: {s['yellow_line']:.2f} | {line_pos}")
-            parts.append(f"- J值: {s['J']:.1f} | 量比: {s['vol_ratio']:.2f} | ATR: {s['atr14']:.2f}")
-            if s["sos_dates"]:
-                parts.append(f"- SOS锚定日: {', '.join(s['sos_dates'])}")
-            a = s["analysis"]
-            parts.append(f"- 威科夫: {'; '.join(a['wyckoff'])}")
-            parts.append(f"- VPA量价: {'; '.join(a['vpa'])}")
-            parts.append(f"- 蜡烛图: {'; '.join(a['candle'])}")
-            parts.append(f"- 支撑: {a['support']:.2f} | 阻力: {a['resistance']:.2f}")
-            hard_stop = s["price"] - BEST_PARAMS["hard_stop_atr"] * s["atr14"]
-            chandelier_init = s["price"] - BEST_PARAMS["chandelier_atr_mult"] * s["atr14"]
-            vp_shares = calc_volatility_parity_shares(
-                total_equity=100000,
-                entry_price=s["price"],
-                atr_at_entry=s["atr14"],
-                hard_stop_atr=BEST_PARAMS["hard_stop_atr"],
-                params=BEST_PARAMS,
-            )
-            vp_pct = vp_shares * s["price"] / 100000 * 100 if vp_shares > 0 else 0
-            parts.append(f"- T+1参考买入: {s['price']:.2f}(开盘价) | 硬止损: {hard_stop:.2f} | 吊灯线初始: {chandelier_init:.2f}")
-            parts.append(f"- 波动率平价仓位: {vp_shares}股({vp_pct:.1f}%资金) | 风险1%/{(BEST_PARAMS['hard_stop_atr']*s['atr14']):.2f}元每股")
+            parts.append(f"  收盘 {s['price']:.2f} | {s['change_pct']:+.2f}% | 量比 {s['vol_ratio']:.2f}")
             parts.append("")
     else:
-        parts.append("**今日无潜伏信号**")
+        if can_open:
+            parts.append("今日无符合条件的标的")
+        else:
+            parts.append("环境偏弱，暂无值得关注的标的")
         parts.append("")
 
     parts.append("---")
     parts.append("")
-    parts.append("*模型: 潜伏模型V6.3 | 理论: 威科夫LPS+VPA量价 | 择时: OAMV+行业动量 | 仓位: 波动率平价 | 退出: 4级(硬止损→吊灯→BC→时间)*")
+
+    # ── 页脚 ──
+    parts.append("*量化潜伏系统 · 多维度量化筛选*")
+    parts.append("*以上内容为系统量化输出，不构成投资建议，据此操作风险自担*")
 
     desp = "\n".join(parts)
     return title, desp
@@ -801,6 +718,8 @@ def daily_push(max_stocks=None):
 
     # 3. 全市场扫描
     logger.info("[3/4] 全市场扫描潜伏信号...")
+    cache_stats = get_cache_stats()
+    logger.info(f"  股票缓存: {cache_stats.get('count', 0)}只 | {cache_stats.get('size_mb', 0)}MB")
     logger.info("  批量预筛选全市场行情...")
     prefilter_df = batch_prefilter_stocks()
     signals, all_signals_data = scan_market(

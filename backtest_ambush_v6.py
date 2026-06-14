@@ -13,6 +13,7 @@ import tushare as ts
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 load_dotenv(Path(__file__).parent / ".env")
@@ -33,6 +34,7 @@ from classic_ta.v63_ambush_model import (
     calc_volatility_parity_shares,
     V63_PARAMS,
 )
+from ml_strategy.oamv_filter import OAMVHysteresisFilter
 
 # ── 回测股票池 ──────────────────────────────────────────────────────
 BACKTEST_STOCKS = [
@@ -57,6 +59,134 @@ BACKTEST_STOCKS = [
     ("000002.SZ", "万科A"),
     ("600276.SH", "恒瑞医药"),
 ]
+
+
+def get_all_a_stocks(min_list_date="20200101"):
+    """获取全市场A股列表（排除ST、次新）"""
+    try:
+        pro = _get_pro()
+        stock_basic = pro.stock_basic(
+            exchange="", list_status="L",
+            fields="ts_code,symbol,name,industry,list_date",
+        )
+        # 只要沪深A股
+        a_stocks = stock_basic[
+            stock_basic["ts_code"].str.endswith(".SH")
+            | stock_basic["ts_code"].str.endswith(".SZ")
+        ].copy()
+        # 排除ST
+        a_stocks = a_stocks[~a_stocks["name"].str.startswith("ST")]
+        a_stocks = a_stocks[~a_stocks["name"].str.startswith("*ST")]
+        a_stocks = a_stocks[~a_stocks["name"].str.startswith("N")]
+        # 排除次新（上市不足1年）
+        a_stocks = a_stocks[a_stocks["list_date"] < min_list_date]
+        # 排除北交所（8/9开头）
+        a_stocks = a_stocks[~a_stocks["ts_code"].str.startswith("8")]
+        a_stocks = a_stocks[~a_stocks["ts_code"].str.startswith("9")]
+        result = [(row["ts_code"], row["name"]) for _, row in a_stocks.iterrows()]
+        print(f"  全市场A股: {len(result)} 只（排除ST/次新/北交所）")
+        return result
+    except Exception as e:
+        print(f"  获取股票列表失败: {e}")
+        return BACKTEST_STOCKS
+
+
+def get_oamv_allow_buy(start_date="20200101", end_date="20260516"):
+    """获取OAMV活跃市值择时：允许买入的日期集合（指南针同款参数）"""
+    try:
+        from ml_strategy.market_amv_cache import get_market_amv_series_for_backtest
+
+        # 优化后参数: SMA(15)平滑 + CostMA(42), 阈值+2.0%/-1.0%
+        amv_series = get_market_amv_series_for_backtest(start_date=start_date, end_date=end_date)
+        if amv_series is not None and len(amv_series) >= 40:
+            oamv = OAMVHysteresisFilter(
+                upper_threshold=2.0, lower_threshold=-1.0,
+                cost_ma_period=42, roc_period=1,
+                weekly_ema_period=5, weekly_use_ema=True,
+                smooth_method='sma', smooth_period=15,
+                cost_ma_method='sma',
+            )
+            oamv.fit(amv_series=amv_series)
+            data_source = "优化后活筹(SMA15+CostMA42|+2.0/-1.0)"
+        else:
+            # 回退: 使用沪深300成交额代理
+            print("  OAMV: 全市场活跃市值数据不足，回退到成交额代理")
+            pro = _get_pro()
+            index_df = pro.index_daily(ts_code="000300.SH", start_date=start_date, end_date=end_date)
+            if index_df is None or len(index_df) < 40:
+                print("  OAMV: 沪深300数据不足，跳过择时")
+                return None
+            index_df = index_df.sort_values("trade_date").reset_index(drop=True)
+            index_df["Date"] = pd.to_datetime(index_df["trade_date"], format="%Y%m%d")
+            index_df.set_index("Date", inplace=True)
+            index_df["amount"] = index_df["amount"].astype(float)
+            oamv = OAMVHysteresisFilter(
+                upper_threshold=2.0, lower_threshold=-1.0,
+                cost_ma_period=42, smooth_method='sma', smooth_period=15,
+            )
+            oamv.fit(index_df)
+            data_source = "成交额代理(amount)"
+
+        state_df = oamv.get_state_df()
+        if state_df is None or len(state_df) == 0:
+            return None
+
+        # 构建market_allow_buy Series（按日期索引，True=允许买入）
+        market_allow_buy = state_df["oamv_state"] == 1
+        allowed_count = market_allow_buy.sum()
+        total_count = len(market_allow_buy)
+        print(f"  OAMV择时: {data_source} | 允许交易{allowed_count}/{total_count}天 "
+              f"({allowed_count/total_count*100:.1f}%)")
+
+        return market_allow_buy
+    except Exception as e:
+        print(f"  OAMV计算失败: {e}，跳过择时")
+        return None
+
+
+def get_oamv_allow_buy_v2(start_date="20200101", end_date="20260516",
+                          buy_threshold=0.0425, sell_threshold=0.0125):
+    """获取OAMV择时：基于AMV单日涨跌幅阈值（校准版）
+
+    逻辑(Long-Only):
+      - AMV单日涨幅 >= buy_threshold → 允许买入 (True)
+      - AMV单日跌幅 <= -sell_threshold → 禁止买入 (False)
+      - 其他: 维持上一日状态
+    """
+    try:
+        from ml_strategy.market_amv_cache import get_market_amv_series_for_backtest
+        import tushare as ts
+
+        amv_series = get_market_amv_series_for_backtest(start_date=start_date, end_date=end_date)
+        if amv_series is None or len(amv_series) < 40:
+            print("  AMV校准版: 数据不足，跳过")
+            return None
+
+        # 计算AMV单日涨跌幅
+        amv_roc = amv_series.pct_change(1)
+
+        # 生成允许买入序列
+        allow = pd.Series(False, index=amv_series.index)
+        for i in range(1, len(amv_roc)):
+            roc = amv_roc.iloc[i]
+            if pd.isna(roc):
+                allow.iloc[i] = allow.iloc[i-1]
+            elif roc >= buy_threshold:
+                allow.iloc[i] = True
+            elif roc <= -sell_threshold:
+                allow.iloc[i] = False
+            else:
+                allow.iloc[i] = allow.iloc[i-1]
+
+        allowed_count = allow.sum()
+        total_count = len(allow)
+        print(f"  AMV校准版: buy>={buy_threshold:.2%}, sell<={sell_threshold:.2%} | "
+              f"允许交易{allowed_count}/{total_count}天 ({allowed_count/total_count*100:.1f}%)")
+
+        return allow
+    except Exception as e:
+        print(f"  AMV校准版计算失败: {e}，跳过择时")
+        return None
 
 
 def get_backtest_data(ts_code, start_date="20200101", end_date="20260516"):
@@ -116,52 +246,24 @@ def backtest_single_stock(df, initial_cash=100000):
         return []
 
 
-def run_backtest(start_date="20200101", end_date="20260516", stocks=None):
-    """主回测入口"""
-    if stocks is None:
-        stocks = BACKTEST_STOCKS
-
-    print("=" * 100)
-    print("  潜伏模型V6.3 — 回测系统（前复权数据）")
-    print(f"  回测区间: {start_date} ~ {end_date}")
-    print(f"  回测股票: {len(stocks)} 只")
-    print(f"  数据处理: tushare daily + adj_factor 手动前复权（与推送一致）")
-    print(f"  策略逻辑: 威科夫LPS + VPA枯竭 + 微观确认(VWAP/VCP)")
-    print(f"  退出机制: 硬止损(-2.5ATR) | 吊灯止盈(3.5ATR) | Buy Climax | 时间止损(10日)")
-    print("=" * 100)
-
-    all_trades = []
-    stock_summaries = []
-    processed = 0
-    errors = 0
-    start_time = time.time()
-
-    for ts_code, name in stocks:
-        processed += 1
-        print(f"\n[{processed}/{len(stocks)}] {name} ({ts_code})")
-
+def _backtest_one_stock(ts_code, name, start_date, end_date):
+    """单只股票回测（用于并发）"""
+    try:
         df = get_backtest_data(ts_code, start_date, end_date)
         if df is None:
-            print(f"  数据获取失败")
-            errors += 1
-            continue
+            return ts_code, name, None, 0, []
 
-        try:
-            trades = backtest_single_stock(df)
-        except Exception as e:
-            print(f"  回测失败: {e}")
-            errors += 1
-            continue
+        trades = backtest_single_stock(df)
 
         # 信号统计
         df_ind = IndicatorCalcBase(df)
         df_ind = add_micro_confirm_indicators(df_ind)
         df_sig = Detect_AmbushSignal_V63(df_ind, V63_PARAMS)
-        sig_count = df_sig["ambush_signal"].sum() if "ambush_signal" in df_sig.columns else 0
-        print(f"  潜伏信号={sig_count}")
+        sig_count = int(df_sig["ambush_signal"].sum()) if "ambush_signal" in df_sig.columns else 0
 
+        trade_records = []
         for t in trades:
-            all_trades.append({
+            trade_records.append({
                 "stock": name,
                 "code": ts_code,
                 "buy_date": t.buy_date,
@@ -175,31 +277,175 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None):
                 "exit_reason": t.exit_reason,
             })
 
-        if trades:
-            win_trades = [t for t in trades if t.profit_pct > 0]
-            lose_trades = [t for t in trades if t.profit_pct <= 0]
-            avg_profit = np.mean([t.profit_pct for t in trades])
-            avg_hold = np.mean([t.hold_days for t in trades])
-            win_rate = len(win_trades) / len(trades) * 100
-            print(f"  📈 交易={len(trades)}笔 胜率={win_rate:.0f}% 平均收益={avg_profit:+.2f}% 平均持仓={avg_hold:.1f}天")
-        else:
-            print(f"  📈 无交易")
+        return ts_code, name, trade_records, sig_count, trades
+    except Exception as e:
+        return ts_code, name, None, 0, []
 
-        stock_summaries.append({
-            "code": ts_code,
-            "name": name,
-            "trades": len(trades),
-            "signals": int(sig_count),
-            "avg_profit": round(float(np.mean([t.profit_pct for t in trades])), 2) if trades else 0,
-            "win_rate": round(float(len([t for t in trades if t.profit_pct > 0]) / len(trades) * 100), 2) if trades else 0,
-        })
+
+def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oamv=True, full_market=False, max_workers=3, oamv_mode="v1"):
+    """主回测入口
+
+    oamv_mode:
+        "v1" - 指南针同款(OAMVHysteresisFilter)
+        "v2" - AMV校准版(单日涨跌幅阈值 buy=4.25%/sell=1.25%)
+        "off" - 不使用OAMV择时
+    """
+    if oamv_mode == "off":
+        use_oamv = False
+
+    if full_market:
+        print("\n📊 获取全市场A股列表...")
+        stocks = get_all_a_stocks(min_list_date=start_date)
+    elif stocks is None:
+        stocks = BACKTEST_STOCKS
+
+    print("=" * 100)
+    print("  潜伏模型V6.3 — 回测系统（前复权数据）")
+    print(f"  回测区间: {start_date} ~ {end_date}")
+    print(f"  回测股票: {len(stocks)} 只{'（全市场）' if full_market else ''}")
+    print(f"  数据处理: tushare daily + adj_factor 手动前复权（与推送一致）")
+    print(f"  策略逻辑: 威科夫LPS + VPA枯竭 + 微观确认(VWAP/VCP)")
+    print(f"  退出机制: 硬止损(-2.5ATR) | 吊灯止盈(3.5ATR) | Buy Climax | 时间止损(10日)")
+    print(f"  OAMV择时: {'关闭' if not use_oamv else '指南针同款' if oamv_mode=='v1' else 'AMV校准版(4.25%/1.25%)'}")
+    print("=" * 100)
+
+    # ── OAMV择时 ──
+    market_allow_buy = None
+    if use_oamv:
+        print("\n📊 正在获取OAMV活跃市值数据...")
+        if oamv_mode == "v2":
+            market_allow_buy = get_oamv_allow_buy_v2(start_date, end_date)
+        else:
+            market_allow_buy = get_oamv_allow_buy(start_date, end_date)
+
+    all_trades = []
+    stock_summaries = []
+    processed = 0
+    errors = 0
+    start_time = time.time()
+
+    if full_market and max_workers > 1:
+        # ── 并发模式（全市场） ──
+        print(f"\n🚀 并发回测 {len(stocks)} 只股票 (workers={max_workers})...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for ts_code, name in stocks:
+                f = executor.submit(_backtest_one_stock, ts_code, name, start_date, end_date)
+                futures[f] = (ts_code, name)
+
+            for f in as_completed(futures):
+                ts_code, name = futures[f]
+                processed += 1
+                try:
+                    _, _, trade_records, sig_count, trades = f.result()
+                except Exception:
+                    errors += 1
+                    continue
+
+                if trade_records is None:
+                    errors += 1
+                    if processed % 200 == 0:
+                        print(f"  [{processed}/{len(stocks)}] 进度... 错误{errors}")
+                    continue
+
+                all_trades.extend(trade_records)
+
+                if trades:
+                    stock_summaries.append({
+                        "code": ts_code,
+                        "name": name,
+                        "trades": len(trades),
+                        "signals": sig_count,
+                        "avg_profit": round(float(np.mean([t.profit_pct for t in trades])), 2) if trades else 0,
+                        "win_rate": round(float(len([t for t in trades if t.profit_pct > 0]) / len(trades) * 100), 2) if trades else 0,
+                    })
+
+                if processed % 200 == 0:
+                    elapsed_so_far = time.time() - start_time
+                    speed = processed / elapsed_so_far
+                    eta = (len(stocks) - processed) / speed if speed > 0 else 0
+                    print(f"  [{processed}/{len(stocks)}] 进度... 交易{len(all_trades)}笔 耗时{elapsed_so_far:.0f}s ETA{eta:.0f}s")
+    else:
+        # ── 串行模式 ──
+        for ts_code, name in stocks:
+            processed += 1
+            print(f"\n[{processed}/{len(stocks)}] {name} ({ts_code})")
+
+            df = get_backtest_data(ts_code, start_date, end_date)
+            if df is None:
+                print(f"  数据获取失败")
+                errors += 1
+                continue
+
+            try:
+                trades = backtest_single_stock(df)
+            except Exception as e:
+                print(f"  回测失败: {e}")
+                errors += 1
+                continue
+
+            # 信号统计
+            df_ind = IndicatorCalcBase(df)
+            df_ind = add_micro_confirm_indicators(df_ind)
+            df_sig = Detect_AmbushSignal_V63(df_ind, V63_PARAMS)
+            sig_count = df_sig["ambush_signal"].sum() if "ambush_signal" in df_sig.columns else 0
+            print(f"  潜伏信号={sig_count}")
+
+            for t in trades:
+                all_trades.append({
+                    "stock": name,
+                    "code": ts_code,
+                    "buy_date": t.buy_date,
+                    "sell_date": t.sell_date,
+                    "buy_price": t.buy_price,
+                    "sell_price": t.sell_price,
+                    "shares": t.shares,
+                    "hold_days": t.hold_days,
+                    "profit_pct": t.profit_pct,
+                    "max_profit_pct": t.max_profit_pct,
+                    "exit_reason": t.exit_reason,
+                })
+
+            if trades:
+                win_trades = [t for t in trades if t.profit_pct > 0]
+                lose_trades = [t for t in trades if t.profit_pct <= 0]
+                avg_profit = np.mean([t.profit_pct for t in trades])
+                avg_hold = np.mean([t.hold_days for t in trades])
+                win_rate = len(win_trades) / len(trades) * 100
+                print(f"  📈 交易={len(trades)}笔 胜率={win_rate:.0f}% 平均收益={avg_profit:+.2f}% 平均持仓={avg_hold:.1f}天")
+            else:
+                print(f"  📈 无交易")
+
+            stock_summaries.append({
+                "code": ts_code,
+                "name": name,
+                "trades": len(trades),
+                "signals": int(sig_count),
+                "avg_profit": round(float(np.mean([t.profit_pct for t in trades])), 2) if trades else 0,
+                "win_rate": round(float(len([t for t in trades if t.profit_pct > 0]) / len(trades) * 100), 2) if trades else 0,
+            })
 
     elapsed = time.time() - start_time
     print(f"\n⏱️ 总耗时: {elapsed:.1f}s | 成功: {len(stocks)-errors} | 失败: {errors}")
 
+    # ── OAMV择时过滤 ──
+    if market_allow_buy is not None and all_trades:
+        before_count = len(all_trades)
+        filtered_trades = []
+        for t in all_trades:
+            buy_date = pd.Timestamp(t["buy_date"])
+            if buy_date in market_allow_buy.index and market_allow_buy.loc[buy_date]:
+                filtered_trades.append(t)
+            elif buy_date not in market_allow_buy.index:
+                # 日期不在OAMV数据中，保留（可能超出范围）
+                filtered_trades.append(t)
+        oamv_filtered = before_count - len(filtered_trades)
+        all_trades = filtered_trades
+        print(f"\n🔒 OAMV择时过滤: 移除{oamv_filtered}笔不允许交易, 保留{len(all_trades)}笔")
+
     # ── 汇总报告 ──
     print("\n" + "=" * 100)
-    print("  潜伏模型V6.3 — 回测结果汇总（前复权数据）")
+    print("  潜伏模型V6.3 — 回测结果汇总（前复权数据 + OAMV择时）")
     print("=" * 100)
 
     if not all_trades:
@@ -254,9 +500,10 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None):
     report_file = output_dir / f"ambush_v6_{timestamp}.json"
     result = {
         "version": "6.3",
-        "model": "潜伏模型V6.3（前复权）",
+        "model": "潜伏模型V6.3（前复权 + OAMV择时）",
         "backtest_time": datetime.now().isoformat(),
         "period": f"{start_date}~{end_date}",
+        "oamv_filter": use_oamv,
         "total_trades": total,
         "win_rate": round(win_rate, 2),
         "avg_profit": round(avg_profit, 2),
@@ -277,7 +524,15 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None):
 if __name__ == "__main__":
     start = "20200101"
     end = "20260516"
+    full = False
+    oamv_mode = "v1"
     if len(sys.argv) > 2:
         start = sys.argv[1]
         end = sys.argv[2]
-    run_backtest(start_date=start, end_date=end)
+    if "--full" in sys.argv:
+        full = True
+    if "--oamv" in sys.argv:
+        idx = sys.argv.index("--oamv")
+        if idx + 1 < len(sys.argv):
+            oamv_mode = sys.argv[idx + 1]
+    run_backtest(start_date=start, end_date=end, full_market=full, oamv_mode=oamv_mode)
