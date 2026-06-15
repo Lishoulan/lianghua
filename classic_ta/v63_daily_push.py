@@ -759,6 +759,11 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
                     "signal_date": signal_date.strftime("%Y-%m-%d"),
                     # V6.4：入场质量评分
                     "entry_quality_score": eq_score,
+                    # 评分拆解（E1-E4）
+                    "eq_j_score": int(latest.get("eq_j_score", 0)),
+                    "eq_vol_score": int(latest.get("eq_vol_score", 0)),
+                    "eq_candle_score": int(latest.get("eq_candle_score", 0)),
+                    "eq_ma_score": int(latest.get("eq_ma_score", 0)),
                     # 止损参考
                     "hard_stop": hard_stop,
                     "chandelier_init": chandelier_init,
@@ -830,6 +835,7 @@ def apply_dynamic_score_filter(signals, oamv_status):
 
 def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     today = datetime.now().strftime("%Y-%m-%d")
+    weekday_cn = ["周一","周二","周三","周四","周五","周六","周日"][datetime.now().weekday()]
 
     # ── 市场情绪判断 ──
     if oamv_status:
@@ -850,105 +856,200 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
 
     lines = []
 
-    # ── 头部 ──
-    lines.append(f"今日信号:{len(signals)}只")
+    # ══════════════════════════════════════
+    #  一、今日概览
+    # ══════════════════════════════════════
+    lines.append(f"━━━ 今日概览 ━━━")
+    lines.append(f"📅 {today} {weekday_cn} | {mode_tag}")
     if is_intraday:
-        lines.append(f"模式:盘中实时扫描(数据截至{datetime.now().strftime('%H:%M')})")
+        lines.append(f"⏰ 数据截至 {datetime.now().strftime('%H:%M')}（盘中实时）")
+    lines.append(f"📊 潜伏信号: {len(signals)}只 | 市场情绪: {sentiment_icon}{sentiment}")
 
-    # ── OAMV市场环境 ──
+    # ══════════════════════════════════════
+    #  二、市场环境
+    # ══════════════════════════════════════
+    lines.append("")
+    lines.append(f"━━━ 市场环境 ━━━")
     if oamv_status:
-        oamv_label = "牛市(允许开仓)" if can_open else "熊市(控制仓位)"
-        lines.append(f"OAMV:{oamv_label}|趋势:{oamv_status['trend_label']}|X:{oamv_status['latest_x']}")
+        oamv_label = "🟢牛市(允许开仓)" if can_open else "🔴熊市(控制仓位)"
+        lines.append(f"📈 OAMV活筹: {oamv_label}")
+        lines.append(f"   趋势: {oamv_status['trend_label']} | 强度: {oamv_status['latest_x']}")
         if oamv_status.get("last_transition"):
             lt = oamv_status["last_transition"]
-            lines.append(f"趋势切换:{lt['date']}→{lt['to_state']}")
+            lines.append(f"   最近切换: {lt['date']} → {lt['to_state']}")
+        # 动态评分规则提示
+        if can_open:
+            lines.append(f"   评分规则: 牛市≥5 或 (4+J<3+量比<0.6)")
+        else:
+            lines.append(f"   评分规则: 熊市≥6（严格控制）")
     else:
-        lines.append("OAMV:环境评估中")
+        lines.append("📈 OAMV活筹: 环境评估中")
 
-    lines.append("")
-
-    # ── 行业风向（精简） ──
+    # ══════════════════════════════════════
+    #  三、行业风向
+    # ══════════════════════════════════════
     if industry_stats:
+        lines.append("")
+        lines.append(f"━━━ 行业风向 ━━━")
         hot = [s for s in industry_stats if s["momentum"] > 0]
+        cold = [s for s in industry_stats if s["momentum"] <= 0]
         rotation_in = [s for s in industry_stats if s["rotation"] == "轮入"]
         rotation_out = [s for s in industry_stats if s["rotation"] == "轮出"]
+        accelerating = [s for s in industry_stats if s["rotation"] == "加速"]
 
+        # 热力分布
+        lines.append(f"🔥 偏热 {len(hot)}个 | ❄️ 偏冷 {len(cold)}个")
         if hot:
-            hot_names = "、".join(s["name"] for s in hot[:6])
-            lines.append(f"强势行业({len(hot)}个):{hot_names}")
+            hot_detail = "、".join(f"{s['name']}({s['momentum']:+.1f})" for s in hot[:5])
+            lines.append(f"   领涨: {hot_detail}")
+        if cold:
+            cold_detail = "、".join(f"{s['name']}({s['momentum']:+.1f})" for s in cold[:3])
+            lines.append(f"   领跌: {cold_detail}")
+
+        # 轮动信号
+        rotation_parts = []
         if rotation_in:
-            ri_names = "、".join(s["name"] for s in rotation_in[:4])
-            lines.append(f"轮入:{ri_names}")
+            rotation_parts.append(f"🔄轮入:{'、'.join(s['name'] for s in rotation_in[:3])}")
         if rotation_out:
-            ro_names = "、".join(s["name"] for s in rotation_out[:4])
-            lines.append(f"轮出:{ro_names}")
+            rotation_parts.append(f"⏏️轮出:{'、'.join(s['name'] for s in rotation_out[:3])}")
+        if accelerating:
+            rotation_parts.append(f"🚀加速:{'、'.join(s['name'] for s in accelerating[:3])}")
+        if rotation_parts:
+            lines.append(f"   {' | '.join(rotation_parts)}")
+
+    # ══════════════════════════════════════
+    #  四、潜伏信号
+    # ══════════════════════════════════════
+    lines.append("")
+    lines.append(f"━━━ 潜伏信号 ━━━")
+
+    if not can_open and signals:
+        lines.append("⚠️ 当前环境偏弱，以下标的仅供跟踪观察")
         lines.append("")
 
-    # ── 潜伏信号（完整复刻微信格式） ──
-    if not can_open:
-        lines.append("⚠️当前环境偏弱，以下标的仅供跟踪观察")
-        lines.append("")
-
-    for i, s in enumerate(signals, 1):
-        # 1. 股票名称+代码+行业
-        lines.append(f"{i}.{s['name']}({s['code']}){s['industry']}")
-
-        # 2. 价格+涨跌
-        change_sign = "+" if s['change_pct'] >= 0 else ""
-        lines.append(f"价格:{s['price']:.2f}|涨跌:{change_sign}{s['change_pct']:.2f}%")
-
-        # 3. 白线+黄线+关系
-        ma_rel = "白>黄" if s['white_line'] > s['yellow_line'] else "白<黄" if s['white_line'] < s['yellow_line'] else "白=黄"
-        lines.append(f"白线:{s['white_line']:.2f}|黄线:{s['yellow_line']:.2f}|{ma_rel}")
-
-        # 4. J值+量比+ATR
-        lines.append(f"·J值:{s['J']:.1f}|量比:{s['vol_ratio']:.2f}|ATR:{s['atr14']:.2f}")
-
-        # 5. SOS锚定日
-        if s.get('sos_dates'):
-            lines.append(f"SOS锚定日:{','.join(s['sos_dates'])}")
-
-        # 6. 威科夫解读
-        analysis = s.get('analysis', {})
-        wyckoff = analysis.get('wyckoff', [])
-        if wyckoff:
-            lines.append(f"·威科夫:{';'.join(wyckoff)}")
-
-        # 7. VPA量价解读
-        vpa = analysis.get('vpa', [])
-        if vpa:
-            lines.append(f"VPA量价:{';'.join(vpa)}")
-
-        # 8. 蜡烛图解读
-        candle = analysis.get('candle', [])
-        if candle:
-            lines.append(f"·蜡烛图:{';'.join(candle)}")
-
-        # 9. 支撑+阻力
-        support = analysis.get('support', s['yellow_line'])
-        resistance = analysis.get('resistance', s['yellow_line'])
-        lines.append(f"支撑:{support}|阻力:{resistance}")
-
-        # 10. T+1参考买入+硬止损+吊灯线初始
-        lines.append(f"·T+1参考买入:{s['price']:.2f}(开盘价)|硬止损:{s['hard_stop']:.2f}|吊灯线初始:{s['chandelier_init']:.2f}")
-
-        # 11. 评分信息
-        eq = s.get('entry_quality_score', 0)
-        lines.append(f"·评分:{eq}/8|模型:潜伏模型V6.4|理论:威科夫LPS+VPA量价|择时:OAMV+行业动量|退出:4级(硬止损→吊灯→BC→时间)")
-
-        # 空行分隔
-        lines.append("")
-
-    # ── 页脚 ──
     if not signals:
         if can_open:
-            lines.append("今日无符合条件的标的")
+            lines.append("📭 今日无符合条件的潜伏标的")
+            lines.append("   市场未出现缩量超卖+需求保护的信号")
+            lines.append("   耐心等待，不追涨是纪律")
         else:
-            lines.append("环境偏弱，暂无值得关注的标的")
+            lines.append("🛡️ 环境偏弱，暂无值得关注的标的")
+            lines.append("   OAMV显示资金萎缩，建议空仓观望")
         lines.append("")
+    else:
+        for i, s in enumerate(signals, 1):
+            # ── 信号头部：名称+代码+行业+评分 ──
+            eq = s.get('entry_quality_score', 0)
+            # 评分星级
+            if eq >= 7:
+                score_star = "★★★"
+            elif eq >= 5:
+                score_star = "★★☆"
+            else:
+                score_star = "★☆☆"
 
-    lines.append("·量化潜伏系统·多维度量化筛选")
-    lines.append("·以上内容为系统量化输出，不构成投资建议，据此操作风险自担")
+            lines.append(f"{'─'*30}")
+            lines.append(f"{i}. {s['name']}({s['code']}) | {s['industry']}")
+            lines.append(f"   入场评分: {eq}/8 {score_star}")
+
+            # ── 评分拆解 ──
+            score_parts = []
+            ej = s.get('factor_a', False)  # factor_a = vol_stable → E2量能
+            # 重新从原始字段取评分
+            ej_score = s.get('eq_j_score', None)
+            ev_score = s.get('eq_vol_score', None)
+            ec_score = s.get('eq_candle_score', None)
+            em_score = s.get('eq_ma_score', None)
+            if all(v is not None for v in [ej_score, ev_score, ec_score, em_score]):
+                score_parts.append(f"E1情绪{ej_score}分")
+                score_parts.append(f"E2量能{ev_score}分")
+                score_parts.append(f"E3形态{ec_score}分")
+                score_parts.append(f"E4均线{em_score}分")
+            else:
+                # 从factor推断
+                e1 = 2 if s['J'] < 3 else 1 if s['J'] < 10 else 0
+                e2 = 2 if s['vol_ratio'] < 0.3 else 1 if s['vol_ratio'] < 0.5 else 0
+                score_parts.append(f"E1情绪≈{e1}分")
+                score_parts.append(f"E2量能≈{e2}分")
+                score_parts.append(f"E3形态≈?分")
+                score_parts.append(f"E4均线≈?分")
+            lines.append(f"   拆解: {' | '.join(score_parts)}")
+
+            # ── 价格+涨跌 ──
+            change_sign = "+" if s['change_pct'] >= 0 else ""
+            change_icon = "🔺" if s['change_pct'] >= 0 else "🔻"
+            lines.append(f"   {change_icon} 价格:{s['price']:.2f} | 涨跌:{change_sign}{s['change_pct']:.2f}%")
+
+            # ── 均线结构 ──
+            ma_rel = "白>黄(多头)" if s['white_line'] > s['yellow_line'] else "白<黄(空头)" if s['white_line'] < s['yellow_line'] else "白=黄(收敛)"
+            ma_dist = abs(s['white_line'] - s['yellow_line']) / s['atr14'] if s['atr14'] > 0 else 0
+            lines.append(f"   📏 白线:{s['white_line']:.2f} | 黄线:{s['yellow_line']:.2f} | {ma_rel}")
+            lines.append(f"      线距:{ma_dist:.1f}ATR | ATR:{s['atr14']:.2f}")
+
+            # ── 核心指标 ──
+            j_label = "极度超卖" if s['J'] < 3 else "超卖" if s['J'] < 10 else "偏低" if s['J'] < 20 else "中性"
+            vol_label = "极度缩量" if s['vol_ratio'] < 0.3 else "明显缩量" if s['vol_ratio'] < 0.5 else "缩量" if s['vol_ratio'] < 0.8 else "放量"
+            lines.append(f"   📉 J值:{s['J']:.1f}({j_label}) | 量比:{s['vol_ratio']:.2f}({vol_label})")
+
+            # ── SOS锚定 ──
+            if s.get('sos_dates'):
+                lines.append(f"   📍 SOS锚定日: {', '.join(s['sos_dates'])}")
+
+            # ── 威科夫解读 ──
+            analysis = s.get('analysis', {})
+            wyckoff = analysis.get('wyckoff', [])
+            if wyckoff:
+                lines.append(f"   🔍 威科夫: {'; '.join(wyckoff)}")
+
+            # ── VPA量价 ──
+            vpa = analysis.get('vpa', [])
+            if vpa:
+                lines.append(f"   📊 VPA量价: {'; '.join(vpa)}")
+
+            # ── 蜡烛图 ──
+            candle = analysis.get('candle', [])
+            if candle:
+                lines.append(f"   🕯️ 蜡烛图: {'; '.join(candle)}")
+
+            # ── 支撑阻力 ──
+            support = analysis.get('support', s['yellow_line'])
+            resistance = analysis.get('resistance', s['yellow_line'])
+            lines.append(f"   🎯 支撑:{support} | 阻力:{resistance}")
+
+            # ── 交易参考 ──
+            lines.append(f"   💰 T+1参考买入: {s['price']:.2f}(开盘价)")
+            lines.append(f"      硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线初始: {s['chandelier_init']:.2f}")
+            # 风险收益比
+            risk = s['price'] - s['hard_stop']
+            reward = resistance - s['price']
+            rr_ratio = reward / risk if risk > 0 else 0
+            rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
+            lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
+
+            # ── 策略标签 ──
+            lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
+
+            # 空行分隔
+            lines.append("")
+
+    # ══════════════════════════════════════
+    #  五、策略说明
+    # ══════════════════════════════════════
+    lines.append(f"━━━ 策略说明 ━━━")
+    lines.append(f"📖 核心逻辑: SOS需求大阳线 → 情绪冰点(J超卖+缩量+小实体) → 潜伏买入")
+    lines.append(f"📐 评分体系: E1情绪冰点(0-2) + E2量能枯竭(0-2) + E3盘面形态(0-2) + E4均线结构(0-2)")
+    lines.append(f"🛡️ 风控机制: OAMV择时(牛/熊) → 行业动量过滤 → 动态评分门槛 → 4级退出")
+    if is_intraday:
+        lines.append(f"💡 提示: 盘中扫描量比为部分数据，22:00盘后推送将用完整数据确认")
+
+    # ══════════════════════════════════════
+    #  六、免责声明
+    # ══════════════════════════════════════
+    lines.append("")
+    lines.append(f"━━━ 免责声明 ━━━")
+    lines.append(f"⚠️ 以上内容为量化系统自动输出，不构成任何投资建议")
+    lines.append(f"⚠️ 股市有风险，投资需谨慎，据此操作风险自担")
+    lines.append(f"⚡ 量化潜伏系统 V6.4 | 精细动态评分版")
 
     desp = "\n".join(lines)
     return title, desp
