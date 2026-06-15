@@ -39,15 +39,19 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Get current date
+        id: date
+        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
       - name: Cache stock data & OAMV cache
         uses: actions/cache@v4
         with:
           path: |
-            results/stock_cache
+            results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v1-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: stock-cache-v2-${{ runner.os }}-${{ steps.date.outputs.today }}
           restore-keys: |
-            stock-cache-v1-${{ runner.os }}-
+            stock-cache-v2-${{ runner.os }}-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -70,15 +74,19 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Get current date
+        id: date
+        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
       - name: Cache stock data & OAMV cache
         uses: actions/cache@v4
         with:
           path: |
-            results/stock_cache
+            results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v1-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: stock-cache-v2-${{ runner.os }}-${{ steps.date.outputs.today }}
           restore-keys: |
-            stock-cache-v1-${{ runner.os }}-
+            stock-cache-v2-${{ runner.os }}-
 
       - name: Install dependencies
         run: pip install -r requirements.txt

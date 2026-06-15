@@ -1,4 +1,4 @@
-name: V63 Daily Push
+name: V6.4.5 Daily Push
 
 on:
   schedule:
@@ -21,20 +21,24 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Get current date
+        id: date
+        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
       - name: Cache stock data & OAMV cache
         uses: actions/cache@v4
         with:
           path: |
-            results/stock_cache
+            results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v1-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: stock-cache-v2-${{ runner.os }}-${{ steps.date.outputs.today }}
           restore-keys: |
-            stock-cache-v1-${{ runner.os }}-
+            stock-cache-v2-${{ runner.os }}-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run V6.3 Pre-market Scan (Mootdx)
+      - name: Run V6.4.5 Pre-market Scan (Mootdx)
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
@@ -52,20 +56,24 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Get current date
+        id: date
+        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
       - name: Cache stock data & OAMV cache
         uses: actions/cache@v4
         with:
           path: |
-            results/stock_cache
+            results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v1-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: stock-cache-v2-${{ runner.os }}-${{ steps.date.outputs.today }}
           restore-keys: |
-            stock-cache-v1-${{ runner.os }}-
+            stock-cache-v2-${{ runner.os }}-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run V6.3 Daily Push
+      - name: Run V6.4.5 Daily Push
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}

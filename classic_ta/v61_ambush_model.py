@@ -123,6 +123,7 @@ class ExitReason(Enum):
     CHANDELIER_EXIT = auto()      # 优先级2：吊灯止盈
     BUY_CLIMAX = auto()          # 优先级3：Buy Climax
     VPA_DISTRIBUTION = auto()    # 优先级3.5：VPA派发信号
+    EARLY_EXIT = auto()          # 优先级3.8：快速验证退出
     TIME_STOP = auto()           # 优先级4：时间止损/超时平仓
 
     @property
@@ -132,6 +133,7 @@ class ExitReason(Enum):
             ExitReason.CHANDELIER_EXIT: "吊灯止盈",
             ExitReason.BUY_CLIMAX: "抢购高潮",
             ExitReason.VPA_DISTRIBUTION: "VPA派发",
+            ExitReason.EARLY_EXIT: "快速止损",
             ExitReason.TIME_STOP: "时间止损",
         }[self]
 

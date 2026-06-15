@@ -56,7 +56,9 @@ V63_PARAMS.update({
     "chandelier_atr_mult": 3.5,
     "hard_stop_atr": 2.5,
     "time_stop_days": 10,
-    "ambush_j_oversold": 18,
+    "time_stop_extend_profit_pct": 5.0,    # 浮盈>5%时延长持仓
+    "time_stop_extend_days": 20,           # 延长至20天
+    "ambush_j_oversold": 25,
     "ambush_window": 12,
 
     # --- 维度一：横截面相对强度 ---
@@ -73,12 +75,12 @@ V63_PARAMS.update({
 
     # --- 维度三：智能微观止跌确认 ---
     "micro_confirm_enabled": True,         # 是否启用微观止跌确认
-    "micro_confirm_mode": "all",           # "all"=全部满足才通过（VWAP AND VCP，覆盖率~14%）
-    # 子条件开关（只保留最有效的两个）
+    "micro_confirm_mode": "any",           # "any"=任一满足即可（VWAP OR VCP）
+    # 子条件开关
     "micro_vwap_above": True,              # 收盘价站在VWAP之上
-    "micro_inside_bar": False,             # Inside Bar（关闭，太宽松）
+    "micro_inside_bar": False,             # Inside Bar（关闭）
     "micro_vcp_shrink": True,              # 波动率收缩（ATR连续3日下降）
-    "micro_lower_wick": False,             # 下影线支撑（关闭，与V6.1 Spring Test类似）
+    "micro_lower_wick": False,             # 下影线支撑（关闭）
 
     # --- 维度四：限价单执行 ---
     "limit_order_enabled": False,          # 默认关闭（回测中难以准确模拟，实盘手动执行）
@@ -318,10 +320,13 @@ def add_micro_confirm_indicators(df: pd.DataFrame) -> pd.DataFrame:
       - is_lower_wick_support: 下影线支撑+缩量（改良版Spring Test）
       - micro_confirm: 综合微观确认信号
     """
-    # 1. VWAP（成交量加权平均价）
-    # 统一用典型价近似VWAP，避免前复权后amount/vol与复权价格不可比的问题
+    # 1. VWAP（成交量加权平均价）—— 真正的累计VWAP
     typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["vwap"] = typical_price
+    pv = typical_price * df["Volume"]
+    cum_pv = pv.cumsum()
+    cum_vol = df["Volume"].cumsum().replace(0, np.nan)
+    df["vwap"] = cum_pv / cum_vol
+    df["vwap"] = df["vwap"].fillna(typical_price)  # 无成交量时用典型价兜底
 
     # 2. 收盘价站在VWAP之上
     df["is_above_vwap"] = df["Close"] > df["vwap"]
@@ -514,16 +519,26 @@ def StatefulTradeBacktester_V63(
     pending_signal_idx = None
     pending_limit_price = 0.0  # V6.3：待执行的限价
 
-    # 预计算UT/AD和VPA信号（维度六）
+    # 预计算UT/AD和VPA信号（维度六）—— 模块缺失时优雅降级
+    _has_utad = False
+    _has_vpa = False
     if params.get("utad_exit_enabled", True) or params.get("bearish_vpa_exit_enabled", True):
-        if "is_ut_ad" not in df.columns:
-            from classic_ta.wyckoff_analysis import detect_ut_ad, calc_support_resistance
-            if "support_level" not in df.columns:
-                df = calc_support_resistance(df)
-            df = detect_ut_ad(df)
-        if "bearish_vpa_count" not in df.columns:
-            from classic_ta.volume_price_analysis import run_vpa_analysis
-            df = run_vpa_analysis(df)
+        try:
+            if "is_ut_ad" not in df.columns:
+                from classic_ta.wyckoff_analysis import detect_ut_ad, calc_support_resistance
+                if "support_level" not in df.columns:
+                    df = calc_support_resistance(df)
+                df = detect_ut_ad(df)
+            _has_utad = "is_ut_ad" in df.columns
+        except ImportError:
+            pass
+        try:
+            if "bearish_vpa_count" not in df.columns:
+                from classic_ta.volume_price_analysis import run_vpa_analysis
+                df = run_vpa_analysis(df)
+            _has_vpa = "bearish_vpa_count" in df.columns
+        except ImportError:
+            pass
 
     # 预计算行业允许买入的对齐索引
     ind_allow_aligned = None
@@ -595,11 +610,17 @@ def StatefulTradeBacktester_V63(
                     # V6.2原逻辑：直接以开盘价买入
                     fill_price = current_open
 
-                # ── 维度二：波动率平价仓位 ──
+                # ── 维度二：波动率平价仓位（用当前总权益计算）──
                 # 维度五：动态止损参数（建仓时计算，存入Position）
                 dyn_hard_stop, dyn_chandelier = calc_dynamic_stop_params(df, i, params)
+                # 当前总权益 = 现金 + 已有持仓市值
+                current_equity = cash
+                if position is not None:
+                    current_equity += position.shares * current_price
+                else:
+                    current_equity = initial_cash
                 shares = calc_volatility_parity_shares(
-                    total_equity=initial_cash,
+                    total_equity=current_equity,
                     entry_price=fill_price,
                     atr_at_entry=prev_atr,
                     hard_stop_atr=dyn_hard_stop,
@@ -650,16 +671,15 @@ def StatefulTradeBacktester_V63(
             position.update_peak(float(row["High"]))
 
             # 维度六：UT/AD吊灯收紧
-            # 当浮盈 > utad_min_profit_pct 且 当日检测到UT/AD时，收紧吊灯参数
             effective_chandelier_mult = position.dynamic_chandelier_mult if position.dynamic_chandelier_mult > 0 else params.get("chandelier_atr_mult", 3.5)
-            if params.get("utad_exit_enabled", True) and position.max_profit_pct * 100 > params.get("utad_min_profit_pct", 5.0):
+            if _has_utad and params.get("utad_exit_enabled", True) and position.max_profit_pct * 100 > params.get("utad_min_profit_pct", 5.0):
                 if "is_ut_ad" in df.columns and bool(row.get("is_ut_ad", False)):
                     effective_chandelier_mult = params.get("utad_tighten_chandelier", 1.5)
 
             position.update_chandelier(float(row["High"]), effective_chandelier_mult)
 
             # 维度六：更新连续熊性VPA天数
-            if params.get("bearish_vpa_exit_enabled", True) and "bearish_vpa_count" in df.columns:
+            if _has_vpa and params.get("bearish_vpa_exit_enabled", True) and "bearish_vpa_count" in df.columns:
                 if int(row.get("bearish_vpa_count", 0)) >= params.get("bearish_vpa_min_count", 2):
                     position.consecutive_bearish_vpa += 1
                 else:
@@ -685,20 +705,27 @@ def StatefulTradeBacktester_V63(
                 exit_reason = ExitReason.BUY_CLIMAX
 
             # 优先级3.5：VPA派发信号（维度六）
-            elif (params.get("bearish_vpa_exit_enabled", True)
+            elif (_has_vpa and params.get("bearish_vpa_exit_enabled", True)
                   and position.consecutive_bearish_vpa >= params.get("bearish_vpa_consecutive_days", 2)):
                 exit_reason = ExitReason.VPA_DISTRIBUTION
 
-            # 优先级4：时间止损
-            elif (position.hold_days >= params["time_stop_days"]
-                  and pnl_pct < params.get("time_stop_loss", 0.01)):
-                exit_reason = ExitReason.TIME_STOP
-            elif position.hold_days >= params.get("max_hold_days", 20):
-                exit_reason = ExitReason.TIME_STOP
-            elif (i > 0
-                  and float(row["white_line"]) < float(row["yellow_line"])
-                  and float(df.iloc[i-1]["white_line"]) >= float(df.iloc[i-1]["yellow_line"])):
-                exit_reason = ExitReason.TIME_STOP
+            # 优先级4：动态时间止损（浮盈>5%延长持仓）
+            else:
+                _float_pct = ((current_price - position.entry_price) / position.entry_price) * 100
+                _extend_threshold = params.get("time_stop_extend_profit_pct", 5.0)
+                _extend_days = params.get("time_stop_extend_days", 20)
+                _base_days = params["time_stop_days"]
+                # 浮盈超过阈值 → 使用延长天数；否则使用基础天数
+                _effective_days = _extend_days if _float_pct >= _extend_threshold else _base_days
+                if (position.hold_days >= _effective_days
+                      and pnl_pct < params.get("time_stop_loss", 0.01)):
+                    exit_reason = ExitReason.TIME_STOP
+                elif position.hold_days >= params.get("max_hold_days", 20):
+                    exit_reason = ExitReason.TIME_STOP
+                elif (i > 0
+                      and float(row["white_line"]) < float(row["yellow_line"])
+                      and float(df.iloc[i-1]["white_line"]) >= float(df.iloc[i-1]["yellow_line"])):
+                    exit_reason = ExitReason.TIME_STOP
 
             # 执行卖出
             if exit_reason is not None:

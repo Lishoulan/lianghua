@@ -34,30 +34,67 @@ from classic_ta.v63_ambush_model import (
     calc_volatility_parity_shares,
     V63_PARAMS,
 )
+from classic_ta.v61_ambush_model import TradeRecord
+from classic_ta.v64_ambush_model import (
+    add_inst_support_indicators,
+    Detect_AmbushSignal_V64,
+    StatefulTradeBacktester_V64,
+    analyze_support_score_impact,
+    V64_PARAMS,
+)
 from ml_strategy.oamv_filter import OAMVHysteresisFilter
 
 # ── 回测股票池 ──────────────────────────────────────────────────────
 BACKTEST_STOCKS = [
-    ("600519.SH", "贵州茅台"),
-    ("601318.SH", "中国平安"),
-    ("600036.SH", "招商银行"),
-    ("000001.SZ", "平安银行"),
-    ("000333.SZ", "美的集团"),
-    ("002415.SZ", "海康威视"),
-    ("300750.SZ", "宁德时代"),
-    ("300059.SZ", "东方财富"),
-    ("600570.SH", "恒生电子"),
-    ("601899.SH", "紫金矿业"),
-    ("000858.SZ", "五粮液"),
-    ("000651.SZ", "格力电器"),
-    ("601668.SH", "中国建筑"),
-    ("600362.SH", "江西铜业"),
-    ("601888.SH", "中国中免"),
-    ("002230.SZ", "科大讯飞"),
-    ("600900.SH", "长江电力"),
-    ("601012.SH", "隆基绿能"),
-    ("000002.SZ", "万科A"),
-    ("600276.SH", "恒瑞医药"),
+    # 金融（12）
+    ("600036.SH", "招商银行"), ("601318.SH", "中国平安"), ("000001.SZ", "平安银行"),
+    ("601166.SH", "兴业银行"), ("600000.SH", "浦发银行"), ("601398.SH", "工商银行"),
+    ("600030.SH", "中信证券"), ("601688.SH", "华泰证券"), ("300059.SZ", "东方财富"),
+    ("601601.SH", "中国太保"), ("601628.SH", "中国人寿"), ("600570.SH", "恒生电子"),
+    # 白酒/消费（10）
+    ("600519.SH", "贵州茅台"), ("000858.SZ", "五粮液"), ("000568.SZ", "泸州老窖"),
+    ("002304.SZ", "洋河股份"), ("600809.SH", "山西汾酒"), ("601888.SH", "中国中免"),
+    ("000651.SZ", "格力电器"), ("000333.SZ", "美的集团"), ("600887.SH", "伊利股份"),
+    ("603288.SH", "海天味业"),
+    # 医药（8）
+    ("600276.SH", "恒瑞医药"), ("300760.SZ", "迈瑞医疗"), ("603259.SH", "药明康德"),
+    ("000661.SZ", "长春高新"), ("000538.SZ", "云南白药"), ("600196.SH", "复星医药"),
+    ("300122.SZ", "智飞生物"), ("300347.SZ", "泰格医药"),
+    # 新能源（8）
+    ("300750.SZ", "宁德时代"), ("601012.SH", "隆基绿能"), ("002594.SZ", "比亚迪"),
+    ("300274.SZ", "阳光电源"), ("600438.SH", "通威股份"), ("002459.SZ", "晶澳科技"),
+    ("300014.SZ", "亿纬锂能"), ("688599.SH", "天合光能"),
+    # 科技/半导体（10）
+    ("002415.SZ", "海康威视"), ("002230.SZ", "科大讯飞"), ("688981.SH", "中芯国际"),
+    ("002475.SZ", "立讯精密"), ("002049.SZ", "紫光国微"), ("688012.SH", "涁刻股份"),
+    ("603501.SH", "韦尔股份"), ("002371.SZ", "北方华创"), ("300496.SZ", "中科创达"),
+    ("688036.SH", "传音控股"),
+    # 制造/军工（8）
+    ("600031.SH", "三一重工"), ("601766.SH", "中国中车"), ("600893.SH", "航发动力"),
+    ("002179.SZ", "中航光电"), ("600760.SH", "中航沈飞"), ("000768.SZ", "中航西飞"),
+    ("601100.SH", "恒立液压"), ("002025.SZ", "航天电器"),
+    # 资源/化工（8）
+    ("601899.SH", "紫金矿业"), ("600362.SH", "江西铜业"), ("601088.SH", "中国神华"),
+    ("600309.SH", "万华化学"), ("002466.SZ", "天齐锂业"), ("600489.SH", "中金黄金"),
+    ("600585.SH", "海螺水泥"), ("000893.SZ", "亚钾国际"),
+    # 建筑/地产（6）
+    ("601668.SH", "中国建筑"), ("601390.SH", "中国中铁"), ("000002.SZ", "万科A"),
+    ("600048.SH", "保利发展"), ("001979.SZ", "招商蛇口"), ("601186.SH", "中国铁建"),
+    # 交通/物流（6）
+    ("601919.SH", "中远海控"), ("002352.SZ", "顺丰控股"), ("601006.SH", "大秦铁路"),
+    ("600029.SH", "南方航空"), ("601111.SH", "中国国航"), ("600115.SH", "中国东航"),
+    # 通信/传媒（6）
+    ("000063.SZ", "中兴通讯"), ("600941.SH", "中国移动"), ("002241.SZ", "歌尔股份"),
+    ("300413.SZ", "芒果超媒"), ("603444.SH", "吉比特"), ("002602.SZ", "世纪华通"),
+    # 电力/公用（6）
+    ("600900.SH", "长江电力"), ("600011.SH", "华能国际"), ("600025.SH", "华能水电"),
+    ("003816.SZ", "中国广核"), ("601985.SH", "中国核电"), ("600023.SH", "浙能电力"),
+    # 互联网/软件（6）
+    ("688111.SH", "金山办公"), ("300124.SZ", "汇川技术"), ("002236.SZ", "大华股份"),
+    ("688561.SH", "奇安信"), ("300033.SZ", "同花顺"), ("688169.SH", "石头科技"),
+    # 农业/食品（6）
+    ("002714.SZ", "牧原股份"), ("600598.SH", "北大荒"), ("002311.SZ", "海大集团"),
+    ("000876.SZ", "新希望"), ("002557.SZ", "洽洽食品"), ("605499.SH", "东鹏饮料"),
 ]
 
 
@@ -230,40 +267,55 @@ def get_backtest_data(ts_code, start_date="20200101", end_date="20260516"):
         return None
 
 
-def backtest_single_stock(df, initial_cash=100000):
-    """单只股票回测（V6.3模型）"""
+def backtest_single_stock(df, initial_cash=100000, model_version="v64"):
+    """单只股票回测（V6.4/V6.3模型）"""
     try:
-        df = IndicatorCalcBase(df)
-        df = add_micro_confirm_indicators(df)
-        df = Detect_AmbushSignal_V63(df, V63_PARAMS)
-        trades = StatefulTradeBacktester_V63(
-            df, signal_col="ambush_signal",
-            initial_cash=initial_cash, params=V63_PARAMS,
-        )
+        if model_version == "v64":
+            df = IndicatorCalcBase(df)
+            df = add_micro_confirm_indicators(df)
+            df = add_inst_support_indicators(df, V64_PARAMS)
+            df = Detect_AmbushSignal_V64(df, V64_PARAMS)
+            trades = StatefulTradeBacktester_V64(
+                df, signal_col="ambush_signal",
+                initial_cash=initial_cash, params=V64_PARAMS,
+            )
+        else:
+            df = IndicatorCalcBase(df)
+            df = add_micro_confirm_indicators(df)
+            df = Detect_AmbushSignal_V63(df, V63_PARAMS)
+            trades = StatefulTradeBacktester_V63(
+                df, signal_col="ambush_signal",
+                initial_cash=initial_cash, params=V63_PARAMS,
+            )
         return trades
     except Exception as e:
         print(f"    回测异常: {e}")
         return []
 
 
-def _backtest_one_stock(ts_code, name, start_date, end_date):
+def _backtest_one_stock(ts_code, name, start_date, end_date, model_version="v64"):
     """单只股票回测（用于并发）"""
     try:
         df = get_backtest_data(ts_code, start_date, end_date)
         if df is None:
             return ts_code, name, None, 0, []
 
-        trades = backtest_single_stock(df)
+        params = V64_PARAMS if model_version == "v64" else V63_PARAMS
+        trades = backtest_single_stock(df, model_version=model_version)
 
         # 信号统计
         df_ind = IndicatorCalcBase(df)
         df_ind = add_micro_confirm_indicators(df_ind)
-        df_sig = Detect_AmbushSignal_V63(df_ind, V63_PARAMS)
+        if model_version == "v64":
+            df_ind = add_inst_support_indicators(df_ind, V64_PARAMS)
+            df_sig = Detect_AmbushSignal_V64(df_ind, V64_PARAMS)
+        else:
+            df_sig = Detect_AmbushSignal_V63(df_ind, V63_PARAMS)
         sig_count = int(df_sig["ambush_signal"].sum()) if "ambush_signal" in df_sig.columns else 0
 
         trade_records = []
         for t in trades:
-            trade_records.append({
+            record = {
                 "stock": name,
                 "code": ts_code,
                 "buy_date": t.buy_date,
@@ -275,14 +327,17 @@ def _backtest_one_stock(ts_code, name, start_date, end_date):
                 "profit_pct": t.profit_pct,
                 "max_profit_pct": t.max_profit_pct,
                 "exit_reason": t.exit_reason,
-            })
+            }
+            if model_version == "v64" and hasattr(t, 'stock_name'):
+                record["factor_details"] = t.stock_name  # V6.4: A1B0C1D1
+            trade_records.append(record)
 
         return ts_code, name, trade_records, sig_count, trades
     except Exception as e:
         return ts_code, name, None, 0, []
 
 
-def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oamv=True, full_market=False, max_workers=3, oamv_mode="v1"):
+def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oamv=True, full_market=False, max_workers=3, oamv_mode="v1", model_version="v64"):
     """主回测入口
 
     oamv_mode:
@@ -300,11 +355,16 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
         stocks = BACKTEST_STOCKS
 
     print("=" * 100)
-    print("  潜伏模型V6.3 — 回测系统（前复权数据）")
+    model_label = "V6.4（主力托底评分）" if model_version == "v64" else "V6.3"
+    print(f"  潜伏模型{model_label} — 回测系统（前复权数据）")
     print(f"  回测区间: {start_date} ~ {end_date}")
     print(f"  回测股票: {len(stocks)} 只{'（全市场）' if full_market else ''}")
     print(f"  数据处理: tushare daily + adj_factor 手动前复权（与推送一致）")
-    print(f"  策略逻辑: 威科夫LPS + VPA枯竭 + 微观确认(VWAP/VCP)")
+    if model_version == "v64":
+        print(f"  策略逻辑: 威科夫LPS + VPA枯竭 + 微观确认(VWAP/VCP) + 主力托底评分(A/B/C/D)")
+        print(f"  托底评分: 缩量企稳 + 量价背离 + 支撑试探 + 日内承接 (min>={V64_PARAMS['inst_support_min_score']}分)")
+    else:
+        print(f"  策略逻辑: 威科夫LPS + VPA枯竭 + 微观确认(VWAP/VCP)")
     print(f"  退出机制: 硬止损(-2.5ATR) | 吊灯止盈(3.5ATR) | Buy Climax | 时间止损(10日)")
     print(f"  OAMV择时: {'关闭' if not use_oamv else '指南针同款' if oamv_mode=='v1' else 'AMV校准版(4.25%/1.25%)'}")
     print("=" * 100)
@@ -330,7 +390,7 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for ts_code, name in stocks:
-                f = executor.submit(_backtest_one_stock, ts_code, name, start_date, end_date)
+                f = executor.submit(_backtest_one_stock, ts_code, name, start_date, end_date, model_version)
                 futures[f] = (ts_code, name)
 
             for f in as_completed(futures):
@@ -378,7 +438,7 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
                 continue
 
             try:
-                trades = backtest_single_stock(df)
+                trades = backtest_single_stock(df, model_version=model_version)
             except Exception as e:
                 print(f"  回测失败: {e}")
                 errors += 1
@@ -387,12 +447,16 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
             # 信号统计
             df_ind = IndicatorCalcBase(df)
             df_ind = add_micro_confirm_indicators(df_ind)
-            df_sig = Detect_AmbushSignal_V63(df_ind, V63_PARAMS)
+            if model_version == "v64":
+                df_ind = add_inst_support_indicators(df_ind, V64_PARAMS)
+                df_sig = Detect_AmbushSignal_V64(df_ind, V64_PARAMS)
+            else:
+                df_sig = Detect_AmbushSignal_V63(df_ind, V63_PARAMS)
             sig_count = df_sig["ambush_signal"].sum() if "ambush_signal" in df_sig.columns else 0
             print(f"  潜伏信号={sig_count}")
 
             for t in trades:
-                all_trades.append({
+                record = {
                     "stock": name,
                     "code": ts_code,
                     "buy_date": t.buy_date,
@@ -404,7 +468,10 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
                     "profit_pct": t.profit_pct,
                     "max_profit_pct": t.max_profit_pct,
                     "exit_reason": t.exit_reason,
-                })
+                }
+                if model_version == "v64" and hasattr(t, 'stock_name'):
+                    record["factor_details"] = t.stock_name
+                all_trades.append(record)
 
             if trades:
                 win_trades = [t for t in trades if t.profit_pct > 0]
@@ -443,9 +510,32 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
         all_trades = filtered_trades
         print(f"\n🔒 OAMV择时过滤: 移除{oamv_filtered}笔不允许交易, 保留{len(all_trades)}笔")
 
+    # ── 主力托底评分分析（V6.4特有）──
+    if model_version == "v64" and all_trades:
+        print("\n" + "=" * 100)
+        print("  主力托底评分 — 胜率影响分析")
+        print("=" * 100)
+        score_analysis = analyze_support_score_impact(
+            [TradeRecord(
+                buy_date=t["buy_date"], sell_date=t["sell_date"],
+                buy_price=t["buy_price"], sell_price=t["sell_price"],
+                shares=t["shares"], hold_days=t["hold_days"],
+                profit_pct=t["profit_pct"], max_profit_pct=t["max_profit_pct"],
+                exit_reason=t["exit_reason"], ts_code=t["code"],
+                stock_name=t.get("factor_details", ""),
+            ) for t in all_trades]
+        )
+        for score_key, stats in score_analysis.items():
+            score_val = score_key.replace("score_", "")
+            print(f"  评分={score_val}: 交易{stats['trades']}笔 | "
+                  f"胜率{stats['win_rate']:.1f}% | 平均收益{stats['avg_profit']:+.2f}%")
+            if stats.get("factor_pattern"):
+                for pattern, count in stats["factor_pattern"].items():
+                    print(f"          模式{pattern}: {count}笔")
+
     # ── 汇总报告 ──
     print("\n" + "=" * 100)
-    print("  潜伏模型V6.3 — 回测结果汇总（前复权数据 + OAMV择时）")
+    print(f"  潜伏模型{model_label} — 回测结果汇总（前复权数据 + OAMV择时）")
     print("=" * 100)
 
     if not all_trades:
@@ -499,8 +589,8 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_file = output_dir / f"ambush_v6_{timestamp}.json"
     result = {
-        "version": "6.3",
-        "model": "潜伏模型V6.3（前复权 + OAMV择时）",
+        "version": model_version,
+        "model": f"潜伏模型{model_label}（前复权 + OAMV择时）",
         "backtest_time": datetime.now().isoformat(),
         "period": f"{start_date}~{end_date}",
         "oamv_filter": use_oamv,
@@ -522,17 +612,17 @@ def run_backtest(start_date="20200101", end_date="20260516", stocks=None, use_oa
 
 
 if __name__ == "__main__":
-    start = "20200101"
-    end = "20260516"
-    full = False
-    oamv_mode = "v1"
-    if len(sys.argv) > 2:
-        start = sys.argv[1]
-        end = sys.argv[2]
-    if "--full" in sys.argv:
-        full = True
-    if "--oamv" in sys.argv:
-        idx = sys.argv.index("--oamv")
-        if idx + 1 < len(sys.argv):
-            oamv_mode = sys.argv[idx + 1]
-    run_backtest(start_date=start, end_date=end, full_market=full, oamv_mode=oamv_mode)
+    import argparse
+    parser = argparse.ArgumentParser(description="潜伏模型V6.4 回测系统")
+    parser.add_argument("start", nargs="?", default="20200101", help="起始日期 YYYYMMDD")
+    parser.add_argument("end", nargs="?", default="20260516", help="结束日期 YYYYMMDD")
+    parser.add_argument("--full", action="store_true", help="全市场扫描")
+    parser.add_argument("--oamv", default="v1", choices=["v1", "v2", "off"], help="OAMV择时模式")
+    parser.add_argument("--model", default="v64", choices=["v63", "v64"], help="模型版本")
+    parser.add_argument("--workers", type=int, default=3, help="并发数")
+    args = parser.parse_args()
+    run_backtest(
+        start_date=args.start, end_date=args.end,
+        full_market=args.full, oamv_mode=args.oamv,
+        model_version=args.model, max_workers=args.workers,
+    )
