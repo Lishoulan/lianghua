@@ -12,11 +12,15 @@
 
 import logging
 import time
+import threading
 from pathlib import Path
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# DuckDB写入锁（防止多线程并发写入冲突）
+_duckdb_write_lock = threading.Lock()
 
 # 缓存目录和文件
 CACHE_DIR = Path(__file__).parent.parent / "results" / "stock_cache"
@@ -118,7 +122,7 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 logger.warning(f"数据清洗: 检测到{anomaly_count}行涨跌幅>50%，可能为复权异常")
 
     # fillna和dropna
-    df = df.fillna(method="ffill")
+    df = df.ffill()
     df = df.dropna(subset=required_cols)
 
     return df
@@ -139,13 +143,14 @@ def load_stock_cache(ts_code: str):
 def _load_from_duckdb(ts_code: str):
     """从DuckDB加载单只股票数据"""
     try:
-        conn = _get_duckdb_conn()
-        result = conn.execute(
-            "SELECT date, open, high, low, close, volume FROM daily_data "
-            "WHERE ts_code = ? ORDER BY date",
-            [ts_code]
-        ).fetchdf()
-        conn.close()
+        with _duckdb_write_lock:
+            conn = _get_duckdb_conn()
+            result = conn.execute(
+                "SELECT date, open, high, low, close, volume FROM daily_data "
+                "WHERE ts_code = ? ORDER BY date",
+                [ts_code]
+            ).fetchdf()
+            conn.close()
 
         if result is None or len(result) < 10:
             return None
@@ -188,23 +193,24 @@ def save_stock_cache(ts_code: str, df: pd.DataFrame):
 
 
 def _save_to_duckdb(ts_code: str, df: pd.DataFrame):
-    """保存到DuckDB（先删除旧数据再插入新数据）"""
+    """保存到DuckDB（先删除旧数据再插入新数据，加锁防并发冲突）"""
     try:
-        conn = _get_duckdb_conn()
-        # 删除该股票的旧数据
-        conn.execute("DELETE FROM daily_data WHERE ts_code = ?", [ts_code])
+        with _duckdb_write_lock:
+            conn = _get_duckdb_conn()
+            # 删除该股票的旧数据
+            conn.execute("DELETE FROM daily_data WHERE ts_code = ?", [ts_code])
 
-        # 准备插入数据
-        insert_df = df.copy()
-        insert_df["ts_code"] = ts_code
-        insert_df["date"] = insert_df.index.date if hasattr(insert_df.index, "date") else insert_df.index
+            # 准备插入数据
+            insert_df = df.copy()
+            insert_df["ts_code"] = ts_code
+            insert_df["date"] = insert_df.index.date if hasattr(insert_df.index, "date") else insert_df.index
 
-        # 确保列顺序正确
-        insert_df = insert_df[["ts_code", "date", "Open", "High", "Low", "Close", "Volume"]]
-        insert_df.columns = ["ts_code", "date", "open", "high", "low", "close", "volume"]
+            # 确保列顺序正确
+            insert_df = insert_df[["ts_code", "date", "Open", "High", "Low", "Close", "Volume"]]
+            insert_df.columns = ["ts_code", "date", "open", "high", "low", "close", "volume"]
 
-        conn.execute("INSERT INTO daily_data SELECT * FROM insert_df")
-        conn.close()
+            conn.execute("INSERT INTO daily_data SELECT * FROM insert_df")
+            conn.close()
     except Exception as e:
         logger.warning(f"DuckDB保存失败 {ts_code}: {e}，回退到CSV")
         _save_to_csv(ts_code, df)
@@ -358,10 +364,11 @@ def get_cache_stats():
 
     if _is_duckdb_available() and DUCKDB_PATH.exists():
         try:
-            conn = _get_duckdb_conn()
-            count = conn.execute("SELECT COUNT(DISTINCT ts_code) FROM daily_data").fetchone()[0]
+            with _duckdb_write_lock:
+                conn = _get_duckdb_conn()
+                count = conn.execute("SELECT COUNT(DISTINCT ts_code) FROM daily_data").fetchone()[0]
+                conn.close()
             size_mb = round(DUCKDB_PATH.stat().st_size / 1024 / 1024, 1)
-            conn.close()
             return {
                 "mode": "duckdb",
                 "count": count,
