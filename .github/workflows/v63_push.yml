@@ -1,51 +1,20 @@
-name: V6.4.5 Daily Push
+name: V6.4 Daily Push (Fine Dynamic Score)
 
 on:
   schedule:
-    # 盘前扫描：北京时间14:30 = UTC 06:30（每天）
-    - cron: '30 6 * * *'
-    # 每日推送：北京时间18:30 = UTC 10:30（每天）
-    - cron: '30 10 * * *'
-  workflow_dispatch: # 支持手动触发
+    # 北京时间14:00 = UTC 06:00（盘中扫描，使用akshare实时数据+昨日信号）
+    - cron: '0 6 * * 1-5'
+    # 北京时间22:00 = UTC 14:00（盘后推送，使用tushare完整日线数据）
+    - cron: '0 14 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no push)'
+        required: false
+        default: 'false'
 
 jobs:
-  pre-market-scan:
-    if: github.event.schedule == '30 6 * * *' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Get current date
-        id: date
-        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
-
-      - name: Cache stock data & OAMV cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            results/stock_cache.duckdb
-            results/oamv_cache
-          key: stock-cache-v2-${{ runner.os }}-${{ steps.date.outputs.today }}
-          restore-keys: |
-            stock-cache-v2-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run V6.4.5 Pre-market Scan (Mootdx)
-        env:
-          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: python -m classic_ta.v63_mootdx_push
-
   daily-push:
-    if: github.event.schedule == '30 10 * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,15 +35,44 @@ jobs:
           path: |
             results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v2-${{ runner.os }}-${{ steps.date.outputs.today }}
+          key: stock-cache-v3-${{ runner.os }}-${{ steps.date.outputs.today }}
           restore-keys: |
-            stock-cache-v2-${{ runner.os }}-
+            stock-cache-v3-${{ runner.os }}-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run V6.4.5 Daily Push
+      - name: Pre-warm data cache
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        run: |
+          python -c "
+          import sys; sys.path.insert(0,'.')
+          from classic_ta.stock_data_duckdb import get_cache_stats
+          stats = get_cache_stats()
+          print(f'Cache status: {stats.get(\"count\",0)} stocks, {stats.get(\"size_mb\",0)}MB')
+          "
+
+      - name: Run V6.4 Daily Push (Fine Dynamic Score)
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
-        run: python classic_ta/v63_daily_push.py
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "Dry run mode - skipping push"
+            python -c "
+            import sys; sys.path.insert(0,'.')
+            from classic_ta.v63_daily_push import scan_market, build_push_message, get_oamv_status, apply_dynamic_score_filter
+            print('Dry run: modules loaded successfully')
+            "
+          else
+            python -u classic_ta/v63_daily_push.py
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: push-results-${{ steps.date.outputs.today }}
+          path: results/v63_daily/
+          retention-days: 30

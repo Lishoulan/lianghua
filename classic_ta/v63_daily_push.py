@@ -1,14 +1,22 @@
 """
-潜伏模型V6.3 每日实盘推送
+潜伏模型V6.4 每日实盘推送（精细动态评分版）
 ===========================
-基于V6.3最佳参数 + 波动率平价仓位
+基于V6.4优化参数 + 精细动态评分 + 微信推送格式
+
+优化参数:
+  - 评分阈值 3→5, J值超卖 25→10, SOS窗口 12→8
+  - 行业RS前30%→前20%, J极度超卖 0→3
+
+精细动态评分:
+  - OAMV牛市: 评分>=5 或 (评分=4且J<3且量比<0.6)
+  - OAMV熊市: 评分>=6
+  - 所有信号 J<10
 
 推送内容：
   1. OAMV活跃市值择时状态
   2. 行业热度分析（行业动量排名、冷热分布、轮动信号）
-  3. 潜伏买入信号（含行业过滤：只买行业动量>2%的股票）
+  3. 潜伏买入信号（含行业过滤+精细动态评分）
   4. 持仓监控（4级退出：硬止损→吊灯止盈→Buy Climax→时间止损）
-  5. 波动率平价仓位建议
 
 推送渠道：Server酱（微信）
 """
@@ -51,7 +59,7 @@ SERVERCHAN_KEYS = [k.strip() for k in os.getenv("SERVERCHAN_KEY", "").split(",")
 RESULT_DIR = Path(__file__).parent.parent / "results" / "v63_daily"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-# V6.3最佳参数
+# V6.4模型导入
 from classic_ta.v60_ambush_model import IndicatorCalcBase, DEFAULT_PARAMS
 from classic_ta.v61_ambush_model import V61_PARAMS
 from classic_ta.v62_ambush_model import (
@@ -66,7 +74,31 @@ from classic_ta.v64_ambush_model import (
     V64_PARAMS,
 )
 
+# ══════════════════════════════════════════════════════════
+#  优化参数（回测验证最优组合）
+# ══════════════════════════════════════════════════════════
 BEST_PARAMS = V64_PARAMS.copy()
+BEST_PARAMS.update({
+    # 评分阈值 3→5
+    "entry_quality_min_score": 5,
+    # J值超卖阈值 25→10
+    "ambush_j_oversold": 10,
+    # SOS后等待窗口 12→8
+    "ambush_window": 8,
+    # 行业RS前30%→前20%
+    "industry_rs_top_pct": 0.20,
+    # J值极度超卖 0→3
+    "eq_j_extreme": 3,
+})
+
+# 精细动态评分参数
+DYNAMIC_SCORE_PARAMS = {
+    "bull_min_score": 5,           # 牛市最低评分
+    "bull_score4_j_max": 3,        # 牛市评分=4时J值上限
+    "bull_score4_vol_ratio_max": 0.60,  # 牛市评分=4时量比上限
+    "bear_min_score": 6,           # 熊市最低评分
+    "j_hard_cap": 10,             # 所有信号J值硬上限
+}
 
 # 股票日线数据增量缓存
 from classic_ta.stock_data_duckdb import get_stock_data_cached, get_cache_stats
@@ -128,7 +160,6 @@ def get_oamv_status():
             data_source = "成交额代理(amount)"
         else:
             # 优化后参数: SMA(15)平滑 + CostMA(42), 阈值+2.0%/-1.0%
-            # 超额年化+8.12%, 回撤-9.2%, 仅31次切换
             oamv = OAMVHysteresisFilter(
                 upper_threshold=2.0, lower_threshold=-1.0,
                 cost_ma_period=42, roc_period=1,
@@ -253,24 +284,24 @@ def compute_industry_analysis(signals_data, industry_map):
         was_hot = prev_momentum > BEST_PARAMS.get("industry_momentum_threshold", 0.02)
         is_hot = momentum > BEST_PARAMS.get("industry_momentum_threshold", 0.02)
         if not was_hot and is_hot:
-            rotation = "轮入"  # 冷→热，行业正在被资金关注
+            rotation = "轮入"
         elif was_hot and not is_hot:
-            rotation = "轮出"  # 热→冷，资金正在撤离
+            rotation = "轮出"
         elif is_hot and momentum_change > 0.01:
-            rotation = "加速"  # 热且动量还在上升
+            rotation = "加速"
         elif is_hot and momentum_change < -0.01:
-            rotation = "减速"  # 热但动量开始下降
+            rotation = "减速"
         elif not is_hot and momentum_change > 0.01:
-            rotation = "回暖"  # 冷但动量在改善
+            rotation = "回暖"
         elif not is_hot and momentum_change < -0.01:
-            rotation = "恶化"  # 冷且动量还在恶化
+            rotation = "恶化"
         else:
             rotation = "平稳"
 
         industry_stats.append({
             "name": industry,
-            "momentum": round(momentum * 100, 2),  # 转为百分比
-            "momentum_change": round(momentum_change * 100, 2),  # 动量变化（百分点）
+            "momentum": round(momentum * 100, 2),
+            "momentum_change": round(momentum_change * 100, 2),
             "rotation": rotation,
             "signal_count": signal_count,
             "stock_count": stock_count,
@@ -333,6 +364,96 @@ def get_all_a_stocks():
 def get_stock_data(ts_code):
     """获取单只股票日线数据（带增量缓存，首次运行后大幅加速）"""
     return get_stock_data_cached(ts_code, min_rows=130)
+
+
+def get_realtime_quotes():
+    """
+    获取全市场实时行情（akshare），返回 {ts_code: {Open,High,Low,Close,Volume,Amount,...}} 字典
+    盘中推送时用于拼接当日实时K线到昨日缓存数据上
+    """
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_spot_em()
+        if df is None or len(df) == 0:
+            return {}
+
+        quotes = {}
+        for _, row in df.iterrows():
+            code = str(row.get("代码", ""))
+            if code.startswith("6"):
+                ts_code = f"{code}.SH"
+            elif code.startswith("0") or code.startswith("3"):
+                ts_code = f"{code}.SZ"
+            else:
+                continue
+
+            try:
+                close = float(row.get("最新价", 0))
+                if close <= 0:
+                    continue
+                quotes[ts_code] = {
+                    "Open": float(row.get("今开", 0)),
+                    "High": float(row.get("最高", 0)),
+                    "Low": float(row.get("最低", 0)),
+                    "Close": close,
+                    "Volume": float(row.get("成交量", 0)),
+                    "Amount": float(row.get("成交额", 0)),
+                    "change_pct": float(row.get("涨跌幅", 0)),
+                    "turnover": float(row.get("换手率", 0)),
+                    "vol_ratio_rt": float(row.get("量比", 0)) if row.get("量比", 0) else 0,
+                }
+            except (ValueError, TypeError):
+                continue
+
+        print(f"  实时行情获取: {len(quotes)}只", flush=True)
+        return quotes
+    except Exception as e:
+        print(f"  实时行情获取失败: {e}", flush=True)
+        return {}
+
+
+def append_realtime_bar(df, realtime_quote, today_str=None):
+    """
+    将akshare实时行情拼接到日线数据末尾，形成盘中实时K线
+
+    参数:
+      df: 已计算指标的DataFrame（昨日或更早数据）
+      realtime_quote: {Open, High, Low, Close, Volume, Amount, ...}
+      today_str: 今日日期字符串，默认当天
+
+    返回:
+      拼接后的DataFrame（最后一行为实时K线），或原始df（拼接失败时）
+    """
+    if not realtime_quote or realtime_quote.get("Close", 0) <= 0:
+        return df
+
+    try:
+        today = pd.Timestamp(today_str or datetime.now().strftime("%Y-%m-%d"))
+
+        # 如果最后一行已经是今天，更新它而不是追加
+        if len(df) > 0 and df.index[-1] == today:
+            df.iloc[-1]["Open"] = realtime_quote["Open"]
+            df.iloc[-1]["High"] = realtime_quote["High"]
+            df.iloc[-1]["Low"] = realtime_quote["Low"]
+            df.iloc[-1]["Close"] = realtime_quote["Close"]
+            df.iloc[-1]["Volume"] = realtime_quote["Volume"]
+            df.iloc[-1]["Amount"] = realtime_quote["Amount"]
+            return df
+
+        # 构造今日实时K线行
+        new_row = pd.Series({
+            "Open": realtime_quote["Open"],
+            "High": realtime_quote["High"],
+            "Low": realtime_quote["Low"],
+            "Close": realtime_quote["Close"],
+            "Volume": realtime_quote["Volume"],
+            "Amount": realtime_quote["Amount"],
+        }, name=today)
+
+        df = pd.concat([df, new_row.to_frame().T])
+        return df
+    except Exception as e:
+        return df
 
 
 def analyze_signal_detail(df, signal_idx):
@@ -423,17 +544,13 @@ def batch_prefilter_stocks():
             return None
         df["ts_code"] = df["代码"].apply(to_ts_code)
         df = df[df["ts_code"].notna()]
-        # 快速预筛选：价格在白线上方（Close > MA5近似）、J值偏低（涨跌幅<3%）
-        # 这里只做粗筛，后续逐只精确计算
+        # 快速预筛选
         if "涨跌幅" in df.columns:
-            df = df[df["涨跌幅"] < 5]  # 排除已经大涨的
-        # 更激进的预筛选：排除高价股(>100元)和低价股(<3元)
+            df = df[df["涨跌幅"] < 5]
         if "最新价" in df.columns:
             df = df[(df["最新价"] >= 3) & (df["最新价"] <= 100)]
-        # 排除换手率过低的（<0.5%说明无人关注）
         if "换手率" in df.columns:
             df = df[df["换手率"] >= 0.5]
-        # 排除涨跌幅<-5%的（大跌股不适合潜伏）
         if "涨跌幅" in df.columns:
             df = df[df["涨跌幅"] > -5]
         print(f"  批量预筛选: {len(df)}只（排除ST/停牌/北交所/已大涨/极端价格/低换手）")
@@ -443,11 +560,14 @@ def batch_prefilter_stocks():
         return None
 
 
-def _fetch_and_process_one_core(ts_code, name, industry, best_params):
+def _fetch_and_process_one_core(ts_code, name, industry, best_params, realtime_quote=None):
     """获取单只股票数据并计算指标的核心逻辑（不含重试和异常捕获）"""
     df = get_stock_data(ts_code)
     if df is None:
         return (ts_code, name, industry, None)
+    # 盘中模式：拼接实时K线到昨日缓存
+    if realtime_quote is not None:
+        df = append_realtime_bar(df, realtime_quote)
     df = IndicatorCalcBase(df)
     df = add_micro_confirm_indicators(df)
     df = add_inst_support_indicators(df, best_params)
@@ -457,28 +577,22 @@ def _fetch_and_process_one_core(ts_code, name, industry, best_params):
     return (ts_code, name, industry, df)
 
 
-def _fetch_and_process_one_with_retry(ts_code, name, industry, best_params):
+def _fetch_and_process_one_with_retry(ts_code, name, industry, best_params, realtime_quote=None):
     """带重试的单只股票处理（使用tenacity自动重试网络异常）"""
     if TENACITY_AVAILABLE:
         @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10),
                retry=retry_if_exception_type((ConnectionError, TimeoutError)))
         def _retry_wrapper():
-            return _fetch_and_process_one_core(ts_code, name, industry, best_params)
+            return _fetch_and_process_one_core(ts_code, name, industry, best_params, realtime_quote)
         return _retry_wrapper()
     else:
-        return _fetch_and_process_one_core(ts_code, name, industry, best_params)
+        return _fetch_and_process_one_core(ts_code, name, industry, best_params, realtime_quote)
 
 
-def _fetch_and_process_one(ts_code, name, industry, best_params):
-    """获取单只股票数据并计算指标，返回 (ts_code, name, industry, df_or_None)
-
-    健壮性保证：
-    - 单只股票计算崩溃仅记录ERROR日志，绝对不阻断其他股票
-    - 对Detect_AmbushSignal_V64的调用包裹try...except
-    - 网络异常自动重试3次（需安装tenacity）
-    """
+def _fetch_and_process_one(ts_code, name, industry, best_params, realtime_quote=None):
+    """获取单只股票数据并计算指标，返回 (ts_code, name, industry, df_or_None)"""
     try:
-        return _fetch_and_process_one_with_retry(ts_code, name, industry, best_params)
+        return _fetch_and_process_one_with_retry(ts_code, name, industry, best_params, realtime_quote)
     except Exception as e:
         print(f"  股票处理异常 {ts_code}({name}): {e}", flush=True)
         return (ts_code, name, industry, None)
@@ -522,8 +636,8 @@ def _clear_scan_status():
         print(f"  断点续传状态文件清理失败: {e}", flush=True)
 
 
-def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, industry_map=None, prefilter_df=None):
-    """全市场扫描潜伏信号（并发获取数据 + 断点续传）"""
+def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, industry_map=None, prefilter_df=None, realtime_quotes=None):
+    """全市场扫描潜伏信号（并发获取数据 + 断点续传 + 盘中实时拼接）"""
     all_stocks = get_all_a_stocks()
     if not all_stocks:
         print("无法获取股票列表")
@@ -543,8 +657,9 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
         all_stocks = [(tc, n, ind) for tc, n, ind in all_stocks if tc not in completed_set]
         print(f"  断点续传: 跳过{before_count - len(all_stocks)}只已完成股票，剩余{len(all_stocks)}只", flush=True)
 
+    is_intraday = realtime_quotes is not None and len(realtime_quotes) > 0
     total = len(all_stocks)
-    print(f"扫描股票数(预筛选后): {total} | 并发数: 10", flush=True)
+    print(f"扫描股票数(预筛选后): {total} | 并发数: 10 | 模式: {'盘中实时' if is_intraday else '盘后完整'}", flush=True)
 
     signals = []
     all_signals_data = {}
@@ -556,7 +671,9 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {}
         for ts_code, name, industry in all_stocks:
-            future = executor.submit(_fetch_and_process_one, ts_code, name, industry, BEST_PARAMS)
+            # 盘中模式：每只股票传入对应的实时行情
+            rt_quote = realtime_quotes.get(ts_code) if is_intraday else None
+            future = executor.submit(_fetch_and_process_one, ts_code, name, industry, BEST_PARAMS, rt_quote)
             futures[future] = (ts_code, name, industry)
 
         for future in as_completed(futures):
@@ -573,7 +690,6 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
                 result_ts_code, result_name, result_industry, df = future.result()
             except Exception:
                 errors += 1
-                # 即使异常也标记为已完成，避免反复重试同一只股票
                 completed_set.add(ts_code)
                 continue
 
@@ -620,6 +736,13 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
                     if df.iloc[j].get("tag_sos_anchor", False):
                         sos_dates.append(df.index[j].strftime("%m-%d"))
 
+                # 入场质量评分
+                eq_score = int(latest.get("entry_quality_score", 0)) if "entry_quality_score" in df.columns else 0
+
+                # 止损价计算
+                hard_stop = round(float(latest["Close"] * 0.85), 2)  # 硬止损: -15%
+                chandelier_init = round(float(latest["Close"] - 3 * latest["atr14"]), 2)  # 吊灯线初始
+
                 signal_info = {
                     "code": ts_code,
                     "name": name,
@@ -634,7 +757,12 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
                     "sos_dates": sos_dates,
                     "analysis": detail,
                     "signal_date": signal_date.strftime("%Y-%m-%d"),
-                    # V6.4：主力托底评分
+                    # V6.4：入场质量评分
+                    "entry_quality_score": eq_score,
+                    # 止损参考
+                    "hard_stop": hard_stop,
+                    "chandelier_init": chandelier_init,
+                    # 主力托底评分（兼容旧字段）
                     "inst_support_score": int(latest.get("inst_support_score", 0)),
                     "factor_a": bool(latest.get("factor_a_vol_stable", False)),
                     "factor_b": bool(latest.get("factor_b_vp_divergence", False)),
@@ -643,7 +771,7 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
                 }
                 signals.append(signal_info)
                 print(f"  潜伏信号: {name}({ts_code}) [{industry}] {latest['Close']:.2f} {change_pct:+.2f}% "
-                      f"J:{latest['J']:.1f} 量比:{vol_ratio:.2f}", flush=True)
+                      f"J:{latest['J']:.1f} 量比:{vol_ratio:.2f} 评分:{eq_score}", flush=True)
 
     elapsed = time.time() - start_time
     print(f"\n扫描完成! 耗时: {elapsed/60:.1f}min | 信号: {len(signals)}只 | 错误: {errors}", flush=True)
@@ -655,10 +783,52 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
 
 
 # ══════════════════════════════════════════════════════════
-#  推送消息构建
+#  精细动态评分过滤
 # ══════════════════════════════════════════════════════════
 
-def build_push_message(oamv_status, signals, industry_stats):
+def apply_dynamic_score_filter(signals, oamv_status):
+    """
+    精细动态评分过滤：
+    - OAMV牛市: 评分>=5 或 (评分=4且J<3且量比<0.6)
+    - OAMV熊市: 评分>=6
+    - 所有信号 J<10
+    """
+    if not signals:
+        return signals
+
+    is_bull = oamv_status and oamv_status.get("can_open_position", False)
+    dsp = DYNAMIC_SCORE_PARAMS
+
+    filtered = []
+    for s in signals:
+        j = s.get("J", 99)
+        eq = s.get("entry_quality_score", 0)
+        vr = s.get("vol_ratio", 1.0)
+
+        # J值硬上限
+        if j >= dsp["j_hard_cap"]:
+            continue
+
+        if is_bull:
+            # 牛市：评分>=5 直接通过
+            if eq >= dsp["bull_min_score"]:
+                filtered.append(s)
+            # 评分=4 但J<3且量比<0.6（极度冰点+极度缩量）也通过
+            elif eq == 4 and j < dsp["bull_score4_j_max"] and vr < dsp["bull_score4_vol_ratio_max"]:
+                filtered.append(s)
+        else:
+            # 熊市：只允许评分>=6
+            if eq >= dsp["bear_min_score"]:
+                filtered.append(s)
+
+    return filtered
+
+
+# ══════════════════════════════════════════════════════════
+#  推送消息构建（微信格式）
+# ══════════════════════════════════════════════════════════
+
+def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     today = datetime.now().strftime("%Y-%m-%d")
 
     # ── 市场情绪判断 ──
@@ -675,118 +845,112 @@ def build_push_message(oamv_status, signals, industry_stats):
         sentiment = "中性"
         sentiment_icon = "⚪"
 
-    hot_count = len([s for s in industry_stats if s["momentum"] > 0]) if industry_stats else 0
-    cold_count = len(industry_stats) - hot_count if industry_stats else 0
-    title = f"{sentiment_icon} 量化潜伏 {today} | {len(signals)}信号 | {sentiment}"
+    mode_tag = "盘中实时" if is_intraday else "盘后完整"
+    title = f"{sentiment_icon} 量化潜伏 {today} | {len(signals)}信号 | {sentiment} | {mode_tag}"
 
-    parts = []
+    lines = []
 
     # ── 头部 ──
-    parts.append(f"## 📊 量化潜伏 · 每日报告")
-    parts.append(f"**{today}** | 市场情绪: **{sentiment}** {sentiment_icon}")
-    parts.append("")
-    parts.append("---")
-    parts.append("")
+    lines.append(f"今日信号:{len(signals)}只")
+    if is_intraday:
+        lines.append(f"模式:盘中实时扫描(数据截至{datetime.now().strftime('%H:%M')})")
 
-    # ── 市场环境 ──
-    parts.append("### 🌡️ 市场环境")
+    # ── OAMV市场环境 ──
     if oamv_status:
-        parts.append(f"- 活跃度趋势: **{oamv_status['trend_label']}**")
-        parts.append(f"- 操作建议: **{'可积极布局' if can_open else '建议观望，控制仓位'}**")
+        oamv_label = "牛市(允许开仓)" if can_open else "熊市(控制仓位)"
+        lines.append(f"OAMV:{oamv_label}|趋势:{oamv_status['trend_label']}|X:{oamv_status['latest_x']}")
         if oamv_status.get("last_transition"):
             lt = oamv_status["last_transition"]
-            parts.append(f"- 趋势切换于 {lt['date']}")
+            lines.append(f"趋势切换:{lt['date']}→{lt['to_state']}")
     else:
-        parts.append("- 环境评估中，暂默认允许操作")
-    parts.append("")
-    parts.append("---")
-    parts.append("")
+        lines.append("OAMV:环境评估中")
 
-    # ── 行业风向 ──
+    lines.append("")
+
+    # ── 行业风向（精简） ──
     if industry_stats:
-        parts.append("### 🏭 行业风向")
-
-        # 热门行业 Top8
         hot = [s for s in industry_stats if s["momentum"] > 0]
-        if hot:
-            parts.append(f"**强势行业 Top8** ({hot_count}个偏强)")
-            for s in hot[:8]:
-                icon = {"火热": "🔥", "偏热": "🟠", "微热": "🟡"}.get(s["hot_cold"], "⚪")
-                arrow = "↑" if s["momentum_change"] > 0 else "↓" if s["momentum_change"] < 0 else "→"
-                sig_mark = f" ✦{s['signal_count']}信号" if s["signal_count"] > 0 else ""
-                parts.append(f"- {icon} {s['name']} {s['momentum']:+.2f}% {arrow}{sig_mark}")
-            parts.append("")
-
-        # 轮动信号
         rotation_in = [s for s in industry_stats if s["rotation"] == "轮入"]
         rotation_out = [s for s in industry_stats if s["rotation"] == "轮出"]
-        warming = [s for s in industry_stats if s["rotation"] == "回暖"]
 
-        if rotation_in or rotation_out:
-            parts.append("**资金动向**")
-            if rotation_in:
-                names = "、".join(s["name"] for s in rotation_in[:6])
-                parts.append(f"- 🔄 轮入: {names}")
-            if rotation_out:
-                names = "、".join(s["name"] for s in rotation_out[:5])
-                parts.append(f"- ⚠️ 轮出: {names}")
-            if warming:
-                names = "、".join(s["name"] for s in warming[:4])
-                parts.append(f"- 🌱 回暖: {names}")
-            parts.append("")
+        if hot:
+            hot_names = "、".join(s["name"] for s in hot[:6])
+            lines.append(f"强势行业({len(hot)}个):{hot_names}")
+        if rotation_in:
+            ri_names = "、".join(s["name"] for s in rotation_in[:4])
+            lines.append(f"轮入:{ri_names}")
+        if rotation_out:
+            ro_names = "、".join(s["name"] for s in rotation_out[:4])
+            lines.append(f"轮出:{ro_names}")
+        lines.append("")
 
-        # 弱势行业
-        cold = [s for s in industry_stats if s["momentum"] <= 0]
-        if cold:
-            parts.append(f"**弱势行业** ({cold_count}个偏弱)")
-            for s in cold[-5:]:
-                icon = {"冰冷": "❄️", "偏冷": "🔵", "微冷": "🔷"}.get(s["hot_cold"], "⚪")
-                parts.append(f"- {icon} {s['name']} {s['momentum']:+.2f}%")
-            parts.append("")
-
-        parts.append("---")
-        parts.append("")
-
-    # ── 潜伏信号 ──
-    parts.append("### 🎯 潜伏信号")
+    # ── 潜伏信号（完整复刻微信格式） ──
     if not can_open:
-        parts.append("> ⚠️ 当前环境偏弱，以下标的仅供跟踪观察")
-        parts.append("")
+        lines.append("⚠️当前环境偏弱，以下标的仅供跟踪观察")
+        lines.append("")
 
-    if signals:
-        parts.append(f"今日筛选 **{len(signals)}** 只:")
-        parts.append("")
-        for i, s in enumerate(signals, 1):
-            # V6.4：主力托底评分展示
-            score = s.get('inst_support_score', 0)
-            score_bar = '★' * score + '☆' * (3 - score)
-            factors = []
-            if s.get('factor_b'):
-                factors.append('量价背离')
-            if s.get('factor_c'):
-                factors.append('支撑不破')
-            if s.get('factor_d'):
-                factors.append('日内承接')
-            factor_str = '+'.join(factors) if factors else '无'
-            parts.append(f"**{i}. {s['name']}** ({s['code']}) [{s['industry']}]")
-            parts.append(f"  收盘 {s['price']:.2f} | {s['change_pct']:+.2f}% | 量比 {s['vol_ratio']:.2f}")
-            parts.append(f"  托底评分 {score_bar} ({score}/3) | {factor_str}")
-            parts.append("")
-    else:
-        if can_open:
-            parts.append("今日无符合条件的标的")
-        else:
-            parts.append("环境偏弱，暂无值得关注的标的")
-        parts.append("")
+    for i, s in enumerate(signals, 1):
+        # 1. 股票名称+代码+行业
+        lines.append(f"{i}.{s['name']}({s['code']}){s['industry']}")
 
-    parts.append("---")
-    parts.append("")
+        # 2. 价格+涨跌
+        change_sign = "+" if s['change_pct'] >= 0 else ""
+        lines.append(f"价格:{s['price']:.2f}|涨跌:{change_sign}{s['change_pct']:.2f}%")
+
+        # 3. 白线+黄线+关系
+        ma_rel = "白>黄" if s['white_line'] > s['yellow_line'] else "白<黄" if s['white_line'] < s['yellow_line'] else "白=黄"
+        lines.append(f"白线:{s['white_line']:.2f}|黄线:{s['yellow_line']:.2f}|{ma_rel}")
+
+        # 4. J值+量比+ATR
+        lines.append(f"·J值:{s['J']:.1f}|量比:{s['vol_ratio']:.2f}|ATR:{s['atr14']:.2f}")
+
+        # 5. SOS锚定日
+        if s.get('sos_dates'):
+            lines.append(f"SOS锚定日:{','.join(s['sos_dates'])}")
+
+        # 6. 威科夫解读
+        analysis = s.get('analysis', {})
+        wyckoff = analysis.get('wyckoff', [])
+        if wyckoff:
+            lines.append(f"·威科夫:{';'.join(wyckoff)}")
+
+        # 7. VPA量价解读
+        vpa = analysis.get('vpa', [])
+        if vpa:
+            lines.append(f"VPA量价:{';'.join(vpa)}")
+
+        # 8. 蜡烛图解读
+        candle = analysis.get('candle', [])
+        if candle:
+            lines.append(f"·蜡烛图:{';'.join(candle)}")
+
+        # 9. 支撑+阻力
+        support = analysis.get('support', s['yellow_line'])
+        resistance = analysis.get('resistance', s['yellow_line'])
+        lines.append(f"支撑:{support}|阻力:{resistance}")
+
+        # 10. T+1参考买入+硬止损+吊灯线初始
+        lines.append(f"·T+1参考买入:{s['price']:.2f}(开盘价)|硬止损:{s['hard_stop']:.2f}|吊灯线初始:{s['chandelier_init']:.2f}")
+
+        # 11. 评分信息
+        eq = s.get('entry_quality_score', 0)
+        lines.append(f"·评分:{eq}/8|模型:潜伏模型V6.4|理论:威科夫LPS+VPA量价|择时:OAMV+行业动量|退出:4级(硬止损→吊灯→BC→时间)")
+
+        # 空行分隔
+        lines.append("")
 
     # ── 页脚 ──
-    parts.append("*量化潜伏系统 · 多维度量化筛选*")
-    parts.append("*以上内容为系统量化输出，不构成投资建议，据此操作风险自担*")
+    if not signals:
+        if can_open:
+            lines.append("今日无符合条件的标的")
+        else:
+            lines.append("环境偏弱，暂无值得关注的标的")
+        lines.append("")
 
-    desp = "\n".join(parts)
+    lines.append("·量化潜伏系统·多维度量化筛选")
+    lines.append("·以上内容为系统量化输出，不构成投资建议，据此操作风险自担")
+
+    desp = "\n".join(lines)
     return title, desp
 
 
@@ -794,24 +958,79 @@ def build_push_message(oamv_status, signals, industry_stats):
 #  主流程
 # ══════════════════════════════════════════════════════════
 
+def prewarm_data():
+    """数据预热：确保缓存就绪，提前获取关键数据"""
+    print("\n[预热] 检查数据缓存...", flush=True)
+
+    # 1. 检查DuckDB缓存状态
+    cache_stats = get_cache_stats()
+    cache_count = cache_stats.get("count", 0)
+    cache_size = cache_stats.get("size_mb", 0)
+    print(f"  DuckDB缓存: {cache_count}只股票 | {cache_size}MB", flush=True)
+
+    # 2. 检查akshare可用性（盘中推送依赖实时数据）
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_spot_em()
+        if df is not None and len(df) > 100:
+            print(f"  akshare实时行情: 可用 ({len(df)}只)", flush=True)
+        else:
+            print("  akshare实时行情: 数据异常", flush=True)
+    except Exception as e:
+        print(f"  akshare实时行情: 不可用 ({e})", flush=True)
+
+    # 3. 检查tushare可用性
+    try:
+        pro = _get_pro()
+        test_df = pro.trade_cal(exchange="SSE", is_open="1", limit=1)
+        print(f"  tushare接口: 可用", flush=True)
+    except Exception as e:
+        print(f"  tushare接口: 不可用 ({e})", flush=True)
+
+    # 4. 判断当前时段
+    now = datetime.now()
+    hour = now.hour
+    if 9 <= hour < 15:
+        print(f"  当前时段: 盘中({hour}:00) → 使用akshare实时数据+昨日信号", flush=True)
+    elif hour >= 15:
+        print(f"  当前时段: 盘后({hour}:00) → 使用tushare完整日线数据", flush=True)
+    else:
+        print(f"  当前时段: 盘前({hour}:00) → 使用缓存数据", flush=True)
+
+    print("[预热] 完成", flush=True)
+
+
 def daily_push():
     print("=" * 80, flush=True)
-    print("潜伏模型V6.4.5 每日实盘推送（主力托底评分）", flush=True)
+    print("潜伏模型V6.4 每日实盘推送（精细动态评分版）", flush=True)
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"优化参数: 评分≥5 | J<10 | window=8 | industry_top=20% | eq_j_extreme=3", flush=True)
+    print(f"动态评分: 牛市≥5或(4+J<3+量比<0.6) | 熊市≥6 | J<10", flush=True)
     print("=" * 80, flush=True)
 
+    # 0. 数据预热
+    prewarm_data()
+
+    # 0.5 判断盘中/盘后模式
+    now = datetime.now()
+    is_intraday = 9 <= now.hour < 15  # 9:00~14:59 为盘中
+    if is_intraday:
+        print(f"\n>>> 盘中实时模式 <<<", flush=True)
+    else:
+        print(f"\n>>> 盘后完整模式 <<<", flush=True)
+
     # 1. OAMV活跃市值择时
-    print("\n[1/4] 计算OAMV活跃市值择时...", flush=True)
+    print("\n[1/6] 计算OAMV活跃市值择时...", flush=True)
     oamv_status = get_oamv_status()
     if oamv_status:
         can_open = oamv_status["can_open_position"]
-        print(f"  择时状态: {'允许开仓' if can_open else '禁止开仓'} | "
+        print(f"  择时状态: {'允许开仓(牛市)' if can_open else '禁止开仓(熊市)'} | "
               f"OAMV={oamv_status['latest_x']} | {oamv_status['trend_label']}", flush=True)
     else:
         print("  OAMV计算失败", flush=True)
 
     # 2. 获取行业分类
-    print("\n[2/4] 获取行业分类...", flush=True)
+    print("\n[2/6] 获取行业分类...", flush=True)
     try:
         basic = _get_pro().stock_basic(fields="ts_code,industry", list_status="L")
         industry_map = dict(zip(basic["ts_code"], basic["industry"]))
@@ -820,8 +1039,21 @@ def daily_push():
         print(f"  行业分类获取失败: {e}", flush=True)
         industry_map = {}
 
-    # 3. 全市场扫描
-    print("\n[3/4] 全市场扫描潜伏信号...", flush=True)
+    # 3. 盘中模式：获取实时行情
+    realtime_quotes = None
+    if is_intraday:
+        print("\n[3/6] 获取akshare实时行情（盘中拼接）...", flush=True)
+        realtime_quotes = get_realtime_quotes()
+        if realtime_quotes:
+            print(f"  实时行情: {len(realtime_quotes)}只 → 将拼接为今日实时K线", flush=True)
+        else:
+            print("  实时行情获取失败，回退到盘后模式（使用昨日缓存）", flush=True)
+            is_intraday = False
+    else:
+        print("\n[3/6] 盘后模式，跳过实时行情获取", flush=True)
+
+    # 4. 全市场扫描
+    print("\n[4/6] 全市场扫描潜伏信号...", flush=True)
     cache_stats = get_cache_stats()
     print(f"  股票缓存: {cache_stats.get('count', 0)}只 | {cache_stats.get('size_mb', 0)}MB", flush=True)
     print("  批量预筛选全市场行情...", flush=True)
@@ -830,10 +1062,11 @@ def daily_push():
         industry_allow_matrix=None,  # 先扫描所有信号，行业过滤在后面做
         industry_map=industry_map,
         prefilter_df=prefilter_df,
+        realtime_quotes=realtime_quotes,
     )
 
-    # 4. 行业热度分析
-    print("\n[4/4] 行业热度分析...", flush=True)
+    # 5. 行业热度分析 + 行业过滤
+    print("\n[5/6] 行业热度分析...", flush=True)
     industry_stats = []
     industry_allow_matrix = None
     if all_signals_data and industry_map:
@@ -863,14 +1096,33 @@ def daily_push():
         print(f"  行业过滤: {len(signals)}只 → {len(filtered_signals)}只", flush=True)
         signals = filtered_signals
 
+    # 6. 精细动态评分过滤
+    print("\n[6/6] 精细动态评分过滤...", flush=True)
+    before_dynamic = len(signals)
+    signals = apply_dynamic_score_filter(signals, oamv_status)
+    print(f"  动态评分过滤: {before_dynamic}只 → {len(signals)}只", flush=True)
+    if oamv_status:
+        is_bull = oamv_status.get("can_open_position", False)
+        print(f"  OAMV状态: {'牛市' if is_bull else '熊市'} | "
+              f"规则: {'评分≥5或(4+J<3+量比<0.6)' if is_bull else '评分≥6'} | J<10", flush=True)
+
     # 构建推送消息
     print("\n构建推送消息...", flush=True)
-    title, desp = build_push_message(oamv_status, signals, industry_stats)
+    title, desp = build_push_message(oamv_status, signals, industry_stats, is_intraday=is_intraday)
 
     # 保存结果
     result = {
         "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "version": "V6.4.5",
+        "version": "V6.4-精细动态评分",
+        "mode": "盘中实时" if is_intraday else "盘后完整",
+        "params": {
+            "entry_quality_min_score": BEST_PARAMS["entry_quality_min_score"],
+            "ambush_j_oversold": BEST_PARAMS["ambush_j_oversold"],
+            "ambush_window": BEST_PARAMS["ambush_window"],
+            "industry_rs_top_pct": BEST_PARAMS["industry_rs_top_pct"],
+            "eq_j_extreme": BEST_PARAMS["eq_j_extreme"],
+        },
+        "dynamic_score_rules": DYNAMIC_SCORE_PARAMS,
         "oamv_status": oamv_status,
         "signal_count": len(signals),
         "signals": signals,
@@ -888,10 +1140,11 @@ def daily_push():
 
     # 摘要
     print(f"\n{'='*80}")
-    print(f"OAMV择时: {'允许' if oamv_status and oamv_status['can_open_position'] else '禁止'}")
+    print(f"OAMV择时: {'允许(牛市)' if oamv_status and oamv_status['can_open_position'] else '禁止(熊市)'}")
     print(f"潜伏信号: {len(signals)}只")
     for s in signals:
-        print(f"  - {s['name']}({s['code']}) [{s['industry']}] {s['price']:.2f} J:{s['J']:.1f}")
+        eq = s.get('entry_quality_score', 0)
+        print(f"  - {s['name']}({s['code']}) [{s['industry']}] {s['price']:.2f} J:{s['J']:.1f} 评分:{eq}")
     if industry_stats:
         hot = [s for s in industry_stats if s["momentum"] > 0]
         rot_in = [s for s in industry_stats if s["rotation"] == "轮入"]
