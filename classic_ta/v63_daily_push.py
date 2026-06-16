@@ -945,8 +945,8 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             eq = s.get('entry_quality_score', 0)
             vr = s.get('vol_ratio', 1.0)
             j = s.get('J', 99)
-            # 优先考虑挡: 8分(黄金信号) / 极度缩量(量比<0.3) / J<5(深度超卖)
-            if eq >= 8 or vr < 0.3 or j < 5:
+            # 优先考虑挡: 8分(黄金信号) / 极度缩量(量比<0.3) / J<5(深度超卖) / 10-20元(最佳价格区间)
+            if eq >= 8 or vr < 0.3 or j < 5 or (10 <= s['price'] <= 20):
                 priority_signals.append(s)
             else:
                 normal_signals.append(s)
@@ -954,7 +954,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
         # ── 优先考虑挡 ──
         if priority_signals:
             lines.append(f"🔴 优先考虑挡 ({len(priority_signals)}只)")
-            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | J<5深度超卖")
+            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | J<5深度超卖 | 10-20元最佳区间")
             lines.append("")
 
         for i, s in enumerate(priority_signals, 1):
@@ -970,6 +970,8 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
                 priority_tags.append("💧极度缩量(10日均收+3.8%)")
             if j < 5:
                 priority_tags.append("❄️深度超卖(20日均收+3.1%)")
+            if 10 <= s['price'] <= 20:
+                priority_tags.append("💰10-20元最佳区间(20日均收+4.1%)")
 
             # 评分星级
             if eq >= 8:
