@@ -905,31 +905,31 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     # ══════════════════════════════════════
     #  一、今日概览
     # ══════════════════════════════════════
-    lines.append(f"━━━ 今日概览 ━━━")
-    lines.append(f"📅 {today} {weekday_cn} | {mode_tag}")
+    lines.append(f"▌ 今日概览")
+    lines.append(f"  📅 {today} {weekday_cn} | {mode_tag}")
     if is_intraday:
-        lines.append(f"⏰ 数据截至 {datetime.now().strftime('%H:%M')}（盘中实时）")
-    lines.append(f"📊 潜伏信号: {len(signals)}只 | 市场情绪: {sentiment_icon}{sentiment}")
+        lines.append(f"  ⏰ 数据截至 {datetime.now().strftime('%H:%M')}（盘中实时）")
+    lines.append(f"  📊 潜伏信号: {len(signals)}只 | 市场情绪: {sentiment_icon}{sentiment}")
 
     # ══════════════════════════════════════
     #  二、市场环境
     # ══════════════════════════════════════
     lines.append("")
-    lines.append(f"━━━ 市场环境 ━━━")
+    lines.append(f"▌ 市场环境")
     if oamv_status:
-        oamv_label = "🟢牛市(允许开仓)" if can_open else "🔴熊市(控制仓位)"
-        lines.append(f"📈 OAMV活筹: {oamv_label}")
-        lines.append(f"   趋势: {oamv_status['trend_label']} | 强度: {oamv_status['latest_x']}")
+        oamv_label = "🟢 牛市(允许开仓)" if can_open else "🔴 熊市(控制仓位)"
+        lines.append(f"  📈 OAMV活筹: {oamv_label}")
+        lines.append(f"     趋势: {oamv_status['trend_label']} | 强度: {oamv_status['latest_x']}")
         if oamv_status.get("last_transition"):
             lt = oamv_status["last_transition"]
-            lines.append(f"   最近切换: {lt['date']} → {lt['to_state']}")
+            lines.append(f"     最近切换: {lt['date']} → {lt['to_state']}")
         # 动态评分规则提示
         if can_open:
-            lines.append(f"   评分规则: 牛市≥5 或 (4+J<3+量比<0.6)")
+            lines.append(f"     评分规则: 牛市≥5 或 (4+J<3+量比<0.6)")
         else:
-            lines.append(f"   评分规则: 熊市≥6（严格控制）")
+            lines.append(f"     评分规则: 熊市≥6（严格控制）")
     else:
-        lines.append("📈 OAMV活筹: 环境评估中")
+        lines.append(f"  📈 OAMV活筹: 环境评估中")
 
     # ── 季节性风控提示 ──
     current_month = datetime.now().month
@@ -937,19 +937,19 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     if current_month in sr["danger_months"]:
         month_name = f"{current_month}月"
         if current_month == 3:
-            lines.append(f"   ⛔ 季节性警告: {month_name}连续3年负收益(均-8%)，建议空仓或极轻仓!")
+            lines.append(f"  ⛔ 季节性警告: {month_name}连续3年负收益(均-8%)，建议空仓或极轻仓!")
         elif current_month == 5:
-            lines.append(f"   ⚠️ 季节性警告: {month_name}近3年2年大亏，建议严格控制仓位!")
+            lines.append(f"  ⚠️ 季节性警告: {month_name}近3年2年大亏，建议严格控制仓位!")
     elif current_month in sr["golden_months"]:
         month_name = f"{current_month}月"
-        lines.append(f"   ✅ 季节性利好: {month_name}连续3年正收益，信号可信度较高")
+        lines.append(f"  ✅ 季节性利好: {month_name}连续3年正收益，信号可信度较高")
 
     # ══════════════════════════════════════
     #  三、行业风向
     # ══════════════════════════════════════
     if industry_stats:
         lines.append("")
-        lines.append(f"━━━ 行业风向 ━━━")
+        lines.append(f"▌ 行业风向")
         hot = [s for s in industry_stats if s["momentum"] > 0]
         cold = [s for s in industry_stats if s["momentum"] <= 0]
         rotation_in = [s for s in industry_stats if s["rotation"] == "轮入"]
@@ -957,13 +957,13 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
         accelerating = [s for s in industry_stats if s["rotation"] == "加速"]
 
         # 热力分布
-        lines.append(f"🔥 偏热 {len(hot)}个 | ❄️ 偏冷 {len(cold)}个")
+        lines.append(f"  🔥 偏热 {len(hot)}个 | ❄️ 偏冷 {len(cold)}个")
         if hot:
             hot_detail = "、".join(f"{s['name']}({s['momentum']:+.1f})" for s in hot[:5])
-            lines.append(f"   领涨: {hot_detail}")
+            lines.append(f"     领涨: {hot_detail}")
         if cold:
             cold_detail = "、".join(f"{s['name']}({s['momentum']:+.1f})" for s in cold[:3])
-            lines.append(f"   领跌: {cold_detail}")
+            lines.append(f"     领跌: {cold_detail}")
 
         # 轮动信号
         rotation_parts = []
@@ -974,26 +974,26 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
         if accelerating:
             rotation_parts.append(f"🚀加速:{'、'.join(s['name'] for s in accelerating[:3])}")
         if rotation_parts:
-            lines.append(f"   {' | '.join(rotation_parts)}")
+            lines.append(f"     {' | '.join(rotation_parts)}")
 
     # ══════════════════════════════════════
     #  四、潜伏信号（优先/普通挡位）
     # ══════════════════════════════════════
     lines.append("")
-    lines.append(f"━━━ 潜伏信号 ━━━")
+    lines.append(f"▌ 潜伏信号")
 
     if not can_open and signals:
-        lines.append("⚠️ 当前环境偏弱，以下标的仅供跟踪观察")
+        lines.append(f"  ⚠️ 当前环境偏弱，以下标的仅供跟踪观察")
         lines.append("")
 
     if not signals:
         if can_open:
-            lines.append("📭 今日无符合条件的潜伏标的")
-            lines.append("   市场未出现缩量超卖+需求保护的信号")
-            lines.append("   耐心等待，不追涨是纪律")
+            lines.append(f"  📭 今日无符合条件的潜伏标的")
+            lines.append(f"     市场未出现缩量超卖+需求保护的信号")
+            lines.append(f"     耐心等待，不追涨是纪律")
         else:
-            lines.append("🛡️ 环境偏弱，暂无值得关注的标的")
-            lines.append("   OAMV显示资金萎缩，建议空仓观望")
+            lines.append(f"  🛡️ 环境偏弱，暂无值得关注的标的")
+            lines.append(f"     OAMV显示资金萎缩，建议空仓观望")
         lines.append("")
     else:
         # ── 信号分级（3年回测验证规则） ──
@@ -1031,9 +1031,9 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
 
         # ── 优先考虑挡 ──
         if priority_signals:
-            lines.append(f"🔴 优先考虑挡 ({len(priority_signals)}只)")
-            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | 10-20元最佳区间")
-            lines.append(f"   注意: 7分信号已降级(3年回测7分不如5分) | J<3不优先(极度超卖可能趋势下跌)")
+            lines.append(f"  🔴 优先考虑挡 ({len(priority_signals)}只)")
+            lines.append(f"     条件: 8分黄金信号 | 量比<0.3极度缩量 | 10-20元最佳区间")
+            lines.append(f"     注意: 7分信号已降级(3年回测7分不如5分) | J<3不优先(极度超卖可能趋势下跌)")
             lines.append("")
 
         for i, s in enumerate(priority_signals, 1):
@@ -1060,97 +1060,93 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             else:
                 score_star = "★☆☆"
 
-            lines.append(f"{'─'*30}")
-            lines.append(f"🔴 {i}. {s['name']}({s['code']}) | {s['industry']}")
+            lines.append(f"  ┌{'─'*28}")
+            lines.append(f"  │ 🔴 {i}. {s['name']}({s['code']}) | {s['industry']}")
             if priority_tags:
-                lines.append(f"   {' | '.join(priority_tags)}")
-            lines.append(f"   入场评分: {eq}/8 {score_star}")
+                lines.append(f"  │    {' | '.join(priority_tags)}")
+            lines.append(f"  │")
 
-            # ── 评分拆解 ──
+            # ── 评分 ──
+            lines.append(f"  │ 📐 入场评分: {eq}/8 {score_star}")
             score_parts = []
             ej_score = s.get('eq_j_score', None)
             ev_score = s.get('eq_vol_score', None)
             ec_score = s.get('eq_candle_score', None)
             em_score = s.get('eq_ma_score', None)
             if all(v is not None for v in [ej_score, ev_score, ec_score, em_score]):
-                score_parts.append(f"E1情绪{ej_score}分")
-                score_parts.append(f"E2量能{ev_score}分")
-                score_parts.append(f"E3形态{ec_score}分")
-                score_parts.append(f"E4均线{em_score}分")
+                score_parts.append(f"E1情绪{ej_score}")
+                score_parts.append(f"E2量能{ev_score}")
+                score_parts.append(f"E3形态{ec_score}")
+                score_parts.append(f"E4均线{em_score}")
             else:
                 e1 = 2 if j < 3 else 1 if j < 10 else 0
                 e2 = 2 if vr < 0.3 else 1 if vr < 0.5 else 0
-                score_parts.append(f"E1情绪≈{e1}分")
-                score_parts.append(f"E2量能≈{e2}分")
-                score_parts.append(f"E3形态≈?分")
-                score_parts.append(f"E4均线≈?分")
-            lines.append(f"   拆解: {' | '.join(score_parts)}")
+                score_parts.append(f"E1情绪≈{e1}")
+                score_parts.append(f"E2量能≈{e2}")
+                score_parts.append(f"E3形态≈?")
+                score_parts.append(f"E4均线≈?")
+            lines.append(f"  │    拆解: {' | '.join(score_parts)}")
 
             # ── 价格+涨跌 ──
             change_sign = "+" if s['change_pct'] >= 0 else ""
             change_icon = "🔺" if s['change_pct'] >= 0 else "🔻"
-            lines.append(f"   {change_icon} 价格:{s['price']:.2f} | 涨跌:{change_sign}{s['change_pct']:.2f}%")
+            lines.append(f"  │")
+            lines.append(f"  │ {change_icon} 价格:{s['price']:.2f} | 涨跌:{change_sign}{s['change_pct']:.2f}%")
 
             # ── 均线结构 ──
             ma_rel = "白>黄(多头)" if s['white_line'] > s['yellow_line'] else "白<黄(空头)" if s['white_line'] < s['yellow_line'] else "白=黄(收敛)"
             ma_dist = abs(s['white_line'] - s['yellow_line']) / s['atr14'] if s['atr14'] > 0 else 0
-            lines.append(f"   📏 白线:{s['white_line']:.2f} | 黄线:{s['yellow_line']:.2f} | {ma_rel}")
-            lines.append(f"      线距:{ma_dist:.1f}ATR | ATR:{s['atr14']:.2f}")
+            lines.append(f"  │ 📏 白线:{s['white_line']:.2f} | 黄线:{s['yellow_line']:.2f} | {ma_rel}")
+            lines.append(f"  │    线距:{ma_dist:.1f}ATR | ATR:{s['atr14']:.2f}")
 
             # ── 核心指标 ──
             j_label = "极度超卖" if j < 3 else "深度超卖" if j < 5 else "超卖" if j < 10 else "偏低" if j < 20 else "中性"
             vol_label = "极度缩量" if vr < 0.3 else "明显缩量" if vr < 0.5 else "缩量" if vr < 0.8 else "放量"
-            lines.append(f"   📉 J值:{j:.1f}({j_label}) | 量比:{vr:.2f}({vol_label})")
+            lines.append(f"  │ 📉 J值:{j:.1f}({j_label}) | 量比:{vr:.2f}({vol_label})")
 
             # ── SOS锚定 ──
             if s.get('sos_dates'):
-                lines.append(f"   📍 SOS锚定日: {', '.join(s['sos_dates'])}")
+                lines.append(f"  │ 📍 SOS锚定日: {', '.join(s['sos_dates'])}")
 
             # ── 威科夫解读 ──
             analysis = s.get('analysis', {})
             wyckoff = analysis.get('wyckoff', [])
             if wyckoff:
-                lines.append(f"   🔍 威科夫: {'; '.join(wyckoff)}")
+                lines.append(f"  │ 🔍 威科夫: {'; '.join(wyckoff)}")
 
             # ── VPA量价 ──
             vpa = analysis.get('vpa', [])
             if vpa:
-                lines.append(f"   📊 VPA量价: {'; '.join(vpa)}")
+                lines.append(f"  │ 📊 VPA量价: {'; '.join(vpa)}")
 
             # ── 蜡烛图 ──
             candle = analysis.get('candle', [])
             if candle:
-                lines.append(f"   🕯️ 蜡烛图: {'; '.join(candle)}")
+                lines.append(f"  │ 🕯️ 蜡烛图: {'; '.join(candle)}")
 
             # ── 支撑阻力 ──
             support = analysis.get('support', s['yellow_line'])
             resistance = analysis.get('resistance', s['yellow_line'])
-            lines.append(f"   🎯 支撑:{support} | 阻力:{resistance}")
+            lines.append(f"  │ 🎯 支撑:{support} | 阻力:{resistance}")
 
             # ── 交易参考 ──
-            lines.append(f"   💰 T+1参考买入: {s['price']:.2f}(开盘价)")
-            lines.append(f"      硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线初始: {s['chandelier_init']:.2f}")
+            lines.append(f"  │")
+            lines.append(f"  │ 💰 交易参考")
+            lines.append(f"  │    买入: {s['price']:.2f}(T+1开盘价)")
+            lines.append(f"  │    硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线: {s['chandelier_init']:.2f}")
             risk = s['price'] - s['hard_stop']
             reward = resistance - s['price']
             rr_ratio = reward / risk if risk > 0 else 0
             rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
-            lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
-            lines.append(f"      ⏱️ 建议持仓: 10个交易日(3年回测10日均收峰值+0.36%)")
-            # 仓位管理提示（优先挡）
-            pos_tip = "标准仓10%"
-            if vr < 0.3:
-                pos_tip = "极度缩量可加仓至15%"
-            elif eq >= 8:
-                pos_tip = "8分黄金可加仓至15%"
-            lines.append(f"      📦 仓位建议: {pos_tip} | 单只上限15% | 总敞口≤50%")
-
-            lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
+            lines.append(f"  │    风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
+            lines.append(f"  │    ⏱️ 持仓: 10个交易日 | 📦 仓位: {'极度缩量可加仓至15%' if vr < 0.3 else '8分黄金可加仓至15%' if eq >= 8 else '标准仓10%'} | 总敞口≤50%")
+            lines.append(f"  └{'─'*28}")
             lines.append("")
 
         # ── 普通挡 ──
         if normal_signals:
-            lines.append(f"⚪ 普通挡 ({len(normal_signals)}只)")
-            lines.append(f"   条件: 评分≥5但未达优先挡标准")
+            lines.append(f"  ⚪ 普通挡 ({len(normal_signals)}只)")
+            lines.append(f"     条件: 评分≥5但未达优先挡标准")
             lines.append("")
 
         for i, s in enumerate(normal_signals, 1):
@@ -1165,107 +1161,108 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             else:
                 score_star = "★☆☆"
 
-            lines.append(f"{'─'*30}")
-            lines.append(f"⚪ {i}. {s['name']}({s['code']}) | {s['industry']}")
-            lines.append(f"   入场评分: {eq}/8 {score_star}")
+            lines.append(f"  ┌{'─'*28}")
+            lines.append(f"  │ ⚪ {i}. {s['name']}({s['code']}) | {s['industry']}")
+            lines.append(f"  │")
 
-            # ── 评分拆解 ──
+            # ── 评分 ──
+            lines.append(f"  │ 📐 入场评分: {eq}/8 {score_star}")
             score_parts = []
             ej_score = s.get('eq_j_score', None)
             ev_score = s.get('eq_vol_score', None)
             ec_score = s.get('eq_candle_score', None)
             em_score = s.get('eq_ma_score', None)
             if all(v is not None for v in [ej_score, ev_score, ec_score, em_score]):
-                score_parts.append(f"E1情绪{ej_score}分")
-                score_parts.append(f"E2量能{ev_score}分")
-                score_parts.append(f"E3形态{ec_score}分")
-                score_parts.append(f"E4均线{em_score}分")
+                score_parts.append(f"E1情绪{ej_score}")
+                score_parts.append(f"E2量能{ev_score}")
+                score_parts.append(f"E3形态{ec_score}")
+                score_parts.append(f"E4均线{em_score}")
             else:
                 e1 = 2 if j < 3 else 1 if j < 10 else 0
                 e2 = 2 if vr < 0.3 else 1 if vr < 0.5 else 0
-                score_parts.append(f"E1情绪≈{e1}分")
-                score_parts.append(f"E2量能≈{e2}分")
-                score_parts.append(f"E3形态≈?分")
-                score_parts.append(f"E4均线≈?分")
-            lines.append(f"   拆解: {' | '.join(score_parts)}")
+                score_parts.append(f"E1情绪≈{e1}")
+                score_parts.append(f"E2量能≈{e2}")
+                score_parts.append(f"E3形态≈?")
+                score_parts.append(f"E4均线≈?")
+            lines.append(f"  │    拆解: {' | '.join(score_parts)}")
 
             # ── 价格+涨跌 ──
             change_sign = "+" if s['change_pct'] >= 0 else ""
             change_icon = "🔺" if s['change_pct'] >= 0 else "🔻"
-            lines.append(f"   {change_icon} 价格:{s['price']:.2f} | 涨跌:{change_sign}{s['change_pct']:.2f}%")
+            lines.append(f"  │")
+            lines.append(f"  │ {change_icon} 价格:{s['price']:.2f} | 涨跌:{change_sign}{s['change_pct']:.2f}%")
 
             # ── 均线结构 ──
             ma_rel = "白>黄(多头)" if s['white_line'] > s['yellow_line'] else "白<黄(空头)" if s['white_line'] < s['yellow_line'] else "白=黄(收敛)"
             ma_dist = abs(s['white_line'] - s['yellow_line']) / s['atr14'] if s['atr14'] > 0 else 0
-            lines.append(f"   📏 白线:{s['white_line']:.2f} | 黄线:{s['yellow_line']:.2f} | {ma_rel}")
-            lines.append(f"      线距:{ma_dist:.1f}ATR | ATR:{s['atr14']:.2f}")
+            lines.append(f"  │ 📏 白线:{s['white_line']:.2f} | 黄线:{s['yellow_line']:.2f} | {ma_rel}")
+            lines.append(f"  │    线距:{ma_dist:.1f}ATR | ATR:{s['atr14']:.2f}")
 
             # ── 核心指标 ──
             j_label = "深度超卖" if j < 5 else "超卖" if j < 10 else "偏低" if j < 20 else "中性"
             vol_label = "极度缩量" if vr < 0.3 else "明显缩量" if vr < 0.5 else "缩量" if vr < 0.8 else "放量"
-            lines.append(f"   📉 J值:{j:.1f}({j_label}) | 量比:{vr:.2f}({vol_label})")
+            lines.append(f"  │ 📉 J值:{j:.1f}({j_label}) | 量比:{vr:.2f}({vol_label})")
 
             # ── SOS锚定 ──
             if s.get('sos_dates'):
-                lines.append(f"   📍 SOS锚定日: {', '.join(s['sos_dates'])}")
+                lines.append(f"  │ 📍 SOS锚定日: {', '.join(s['sos_dates'])}")
 
             # ── 威科夫解读 ──
             analysis = s.get('analysis', {})
             wyckoff = analysis.get('wyckoff', [])
             if wyckoff:
-                lines.append(f"   🔍 威科夫: {'; '.join(wyckoff)}")
+                lines.append(f"  │ 🔍 威科夫: {'; '.join(wyckoff)}")
 
             # ── VPA量价 ──
             vpa = analysis.get('vpa', [])
             if vpa:
-                lines.append(f"   📊 VPA量价: {'; '.join(vpa)}")
+                lines.append(f"  │ 📊 VPA量价: {'; '.join(vpa)}")
 
             # ── 蜡烛图 ──
             candle = analysis.get('candle', [])
             if candle:
-                lines.append(f"   🕯️ 蜡烛图: {'; '.join(candle)}")
+                lines.append(f"  │ 🕯️ 蜡烛图: {'; '.join(candle)}")
 
             # ── 支撑阻力 ──
             support = analysis.get('support', s['yellow_line'])
             resistance = analysis.get('resistance', s['yellow_line'])
-            lines.append(f"   🎯 支撑:{support} | 阻力:{resistance}")
+            lines.append(f"  │ 🎯 支撑:{support} | 阻力:{resistance}")
 
             # ── 交易参考 ──
-            lines.append(f"   💰 T+1参考买入: {s['price']:.2f}(开盘价)")
-            lines.append(f"      硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线初始: {s['chandelier_init']:.2f}")
+            lines.append(f"  │")
+            lines.append(f"  │ 💰 交易参考")
+            lines.append(f"  │    买入: {s['price']:.2f}(T+1开盘价)")
+            lines.append(f"  │    硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线: {s['chandelier_init']:.2f}")
             risk = s['price'] - s['hard_stop']
             reward = resistance - s['price']
             rr_ratio = reward / risk if risk > 0 else 0
             rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
-            lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
-            lines.append(f"      ⏱️ 建议持仓: 10个交易日(3年回测10日均收峰值+0.36%)")
-            # 仓位管理提示（普通挡）
-            lines.append(f"      📦 仓位建议: 减仓5% | 单只上限10% | 总敞口≤50%")
-
-            lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
+            lines.append(f"  │    风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
+            lines.append(f"  │    ⏱️ 持仓: 10个交易日 | 📦 仓位: 减仓5% | 总敞口≤50%")
+            lines.append(f"  └{'─'*28}")
             lines.append("")
 
     # ══════════════════════════════════════
     #  五、策略说明
     # ══════════════════════════════════════
-    lines.append(f"━━━ 策略说明 ━━━")
-    lines.append(f"📖 核心逻辑: SOS需求大阳线 → 情绪冰点(J超卖+缩量+小实体) → 潜伏买入")
-    lines.append(f"📐 评分体系: E1情绪冰点(0-2) + E2量能枯竭(0-2) + E3盘面形态(0-2) + E4均线结构(0-2)")
-    lines.append(f"🛡️ 风控机制: OAMV择时(牛/熊) → 行业动量过滤 → 动态评分门槛 → 4级退出")
-    lines.append(f"⏱️ 持仓周期: 最优10天(3年回测验证，10日均收+0.36%为峰值，20日转负)")
-    lines.append(f"📦 仓位管理: 单只≤15%(优先挡)/≤10%(普通挡) | 总敞口≤50% | 极度缩量可加仓")
-    lines.append(f"📅 季节性: 3月/5月高危(连续负收益) | 8月/10月黄金(连续正收益)")
+    lines.append(f"▌ 策略说明")
+    lines.append(f"  📖 核心逻辑: SOS需求大阳线 → 情绪冰点(J超卖+缩量+小实体) → 潜伏买入")
+    lines.append(f"  📐 评分体系: E1情绪冰点(0-2) + E2量能枯竭(0-2) + E3盘面形态(0-2) + E4均线结构(0-2)")
+    lines.append(f"  🛡️ 风控机制: OAMV择时(牛/熊) → 行业动量过滤 → 动态评分门槛 → 4级退出")
+    lines.append(f"  ⏱️ 持仓周期: 最优10天(3年回测验证，10日均收+0.36%为峰值，20日转负)")
+    lines.append(f"  📦 仓位管理: 单只≤15%(优先挡)/≤10%(普通挡) | 总敞口≤50% | 极度缩量可加仓")
+    lines.append(f"  📅 季节性: 3月/5月高危(连续负收益) | 8月/10月黄金(连续正收益)")
     if is_intraday:
-        lines.append(f"💡 提示: 盘中扫描量比为部分数据，22:00盘后推送将用完整数据确认")
+        lines.append(f"  💡 提示: 盘中扫描量比为部分数据，22:00盘后推送将用完整数据确认")
 
     # ══════════════════════════════════════
     #  六、免责声明
     # ══════════════════════════════════════
     lines.append("")
-    lines.append(f"━━━ 免责声明 ━━━")
-    lines.append(f"⚠️ 以上内容为量化系统自动输出，不构成任何投资建议")
-    lines.append(f"⚠️ 股市有风险，投资需谨慎，据此操作风险自担")
-    lines.append(f"⚡ 量化潜伏系统 V6.4 | 精细动态评分版")
+    lines.append(f"▌ 免责声明")
+    lines.append(f"  ⚠️ 以上内容为量化系统自动输出，不构成任何投资建议")
+    lines.append(f"  ⚠️ 股市有风险，投资需谨慎，据此操作风险自担")
+    lines.append(f"  ⚡ 量化潜伏系统 V6.4 | 精细动态评分版")
 
     desp = "\n".join(lines)
     return title, desp
