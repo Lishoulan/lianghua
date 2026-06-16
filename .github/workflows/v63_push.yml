@@ -2,10 +2,10 @@ name: V6.4 Daily Push (Fine Dynamic Score)
 
 on:
   schedule:
-    # 北京时间13:55 = UTC 05:55（盘中扫描，提前5分钟避免GitHub延迟跳过）
-    - cron: '55 5 * * 1-5'
-    # 北京时间21:55 = UTC 13:55（盘后推送，提前5分钟避免GitHub延迟跳过）
-    - cron: '55 13 * * 1-5'
+    # 北京时间12:55 = UTC 04:55（盘中扫描，提前1小时确保准时）
+    - cron: '55 4 * * 1-5'
+    # 北京时间20:55 = UTC 12:55（盘后推送，提前1小时确保准时）
+    - cron: '55 12 * * 1-5'
   workflow_dispatch:
     inputs:
       dry_run:
