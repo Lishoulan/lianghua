@@ -1598,6 +1598,18 @@ def daily_push():
     print(f"推送完成: 管理员组={'成功' if push_results.get('admin') else '跳过/失败'} | "
           f"内测组={'成功' if push_results.get('beta') else '跳过/失败'}", flush=True)
 
+    # 公众号群发（仅盘后模式）
+    if not is_intraday:
+        print("\n公众号群发...", flush=True)
+        try:
+            from wechat_push import push_signals_to_wechat
+            wechat_result = push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=False)
+            print(f"公众号群发: {'成功' if wechat_result.get('success') else '失败'}", flush=True)
+        except Exception as e:
+            print(f"公众号群发异常: {e}", flush=True)
+    else:
+        print("\n盘中模式，跳过公众号群发（仅22:00盘后群发）", flush=True)
+
     # 摘要
     print(f"\n{'='*80}")
     print(f"OAMV择时: {'允许(牛市)' if oamv_status and oamv_status['can_open_position'] else '禁止(熊市)'}")
