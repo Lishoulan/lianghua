@@ -86,8 +86,8 @@ BEST_PARAMS = V64_PARAMS.copy()
 BEST_PARAMS.update({
     # 评分阈值 3→5
     "entry_quality_min_score": 5,
-    # J值超卖阈值 25→10
-    "ambush_j_oversold": 10,
+    # J值超卖阈值 10→5(3年回测: J<3仅+0.05%不如J3-5的+0.36%)
+    "ambush_j_oversold": 5,
     # SOS后等待窗口 12→8
     "ambush_window": 8,
     # 行业RS前30%→前20%
@@ -102,7 +102,7 @@ DYNAMIC_SCORE_PARAMS = {
     "bull_score4_j_max": 5,        # 牛市评分=4时J值上限（原3→5，年度回测J<5收益+3.14%）
     "bull_score4_vol_ratio_max": 0.60,  # 牛市评分=4时量比上限
     "bear_min_score": 6,           # 熊市最低评分
-    "j_hard_cap": 10,             # 所有信号J值硬上限
+    "j_hard_cap": 5,              # 所有信号J值硬上限
 }
 
 # 季节性风控规则（3年回测验证）
@@ -925,9 +925,9 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             lines.append(f"     最近切换: {lt['date']} → {lt['to_state']}")
         # 动态评分规则提示
         if can_open:
-            lines.append(f"     评分规则: 牛市≥5 或 (4+J<3+量比<0.6)")
+            lines.append(f"   评分规则: 牛市≥5 或 (4+J<3+量比<0.6)")
         else:
-            lines.append(f"     评分规则: 熊市≥6（严格控制）")
+            lines.append(f"   评分规则: 熊市≥6（严格控制）")
     else:
         lines.append(f"  📈 OAMV活筹: 环境评估中")
 
@@ -1459,8 +1459,8 @@ def daily_push():
     print("=" * 80, flush=True)
     print("潜伏模型V6.4 每日实盘推送（精细动态评分版）", flush=True)
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-    print(f"优化参数: 评分≥5 | J<10 | window=8 | industry_top=20% | eq_j_extreme=3", flush=True)
-    print(f"动态评分: 牛市≥5或(4+J<3+量比<0.6) | 熊市≥6 | J<10", flush=True)
+    print(f"优化参数: 评分≥5 | J<5 | window=8 | industry_top=20% | eq_j_extreme=3", flush=True)
+    print(f"动态评分: 牛市≥5或(4+J<3+量比<0.6) | 熊市≥6 | J<5", flush=True)
     print("=" * 80, flush=True)
 
     # 0. 数据预热
@@ -1559,7 +1559,7 @@ def daily_push():
     if oamv_status:
         is_bull = oamv_status.get("can_open_position", False)
         print(f"  OAMV状态: {'牛市' if is_bull else '熊市'} | "
-              f"规则: {'评分≥5或(4+J<3+量比<0.6)' if is_bull else '评分≥6'} | J<10", flush=True)
+              f"规则: {'评分≥5或(4+J<3+量比<0.6)' if is_bull else '评分≥6'} | J<5", flush=True)
 
     # 构建推送消息（两组格式）
     print("\n构建推送消息...", flush=True)
