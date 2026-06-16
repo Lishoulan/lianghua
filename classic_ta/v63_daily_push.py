@@ -786,7 +786,7 @@ def scan_market(oamv_weekly_allowed_dates=None, industry_allow_matrix=None, indu
                 eq_score = int(latest.get("entry_quality_score", 0)) if "entry_quality_score" in df.columns else 0
 
                 # 止损价计算
-                hard_stop = round(float(latest["Close"] * 0.85), 2)  # 硬止损: -15%
+                hard_stop = round(float(latest["Close"] * 0.95), 2)  # 硬止损: -5%
                 chandelier_init = round(float(latest["Close"] - 3 * latest["atr14"]), 2)  # 吊灯线初始
 
                 signal_info = {
@@ -1133,7 +1133,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             lines.append(f"  │")
             lines.append(f"  │ 💰 交易参考")
             lines.append(f"  │    买入: {s['price']:.2f}(T+1开盘价)")
-            lines.append(f"  │    硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线: {s['chandelier_init']:.2f}")
+            lines.append(f"  │    硬止损: {s['hard_stop']:.2f}(-5%) | 吊灯线: {s['chandelier_init']:.2f}")
             risk = s['price'] - s['hard_stop']
             reward = resistance - s['price']
             rr_ratio = reward / risk if risk > 0 else 0
@@ -1232,7 +1232,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             lines.append(f"  │")
             lines.append(f"  │ 💰 交易参考")
             lines.append(f"  │    买入: {s['price']:.2f}(T+1开盘价)")
-            lines.append(f"  │    硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线: {s['chandelier_init']:.2f}")
+            lines.append(f"  │    硬止损: {s['hard_stop']:.2f}(-5%) | 吊灯线: {s['chandelier_init']:.2f}")
             risk = s['price'] - s['hard_stop']
             reward = resistance - s['price']
             rr_ratio = reward / risk if risk > 0 else 0
