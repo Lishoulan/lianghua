@@ -94,7 +94,7 @@ BEST_PARAMS.update({
 # 精细动态评分参数
 DYNAMIC_SCORE_PARAMS = {
     "bull_min_score": 5,           # 牛市最低评分
-    "bull_score4_j_max": 3,        # 牛市评分=4时J值上限
+    "bull_score4_j_max": 5,        # 牛市评分=4时J值上限（原3→5，年度回测J<5收益+3.14%）
     "bull_score4_vol_ratio_max": 0.60,  # 牛市评分=4时量比上限
     "bear_min_score": 6,           # 熊市最低评分
     "j_hard_cap": 10,             # 所有信号J值硬上限
@@ -918,7 +918,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             lines.append(f"   {' | '.join(rotation_parts)}")
 
     # ══════════════════════════════════════
-    #  四、潜伏信号
+    #  四、潜伏信号（优先/普通挡位）
     # ══════════════════════════════════════
     lines.append("")
     lines.append(f"━━━ 潜伏信号 ━━━")
@@ -937,11 +937,44 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             lines.append("   OAMV显示资金萎缩，建议空仓观望")
         lines.append("")
     else:
-        for i, s in enumerate(signals, 1):
-            # ── 信号头部：名称+代码+行业+评分 ──
+        # ── 信号分级 ──
+        priority_signals = []  # 优先考虑挡
+        normal_signals = []    # 普通挡
+
+        for s in signals:
             eq = s.get('entry_quality_score', 0)
+            vr = s.get('vol_ratio', 1.0)
+            j = s.get('J', 99)
+            # 优先考虑挡: 8分(黄金信号) / 极度缩量(量比<0.3) / J<5(深度超卖)
+            if eq >= 8 or vr < 0.3 or j < 5:
+                priority_signals.append(s)
+            else:
+                normal_signals.append(s)
+
+        # ── 优先考虑挡 ──
+        if priority_signals:
+            lines.append(f"🔴 优先考虑挡 ({len(priority_signals)}只)")
+            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | J<5深度超卖")
+            lines.append("")
+
+        for i, s in enumerate(priority_signals, 1):
+            eq = s.get('entry_quality_score', 0)
+            vr = s.get('vol_ratio', 1.0)
+            j = s.get('J', 99)
+
+            # 优先挡标签
+            priority_tags = []
+            if eq >= 8:
+                priority_tags.append("⭐8分黄金信号(胜率80%)")
+            if vr < 0.3:
+                priority_tags.append("💧极度缩量(10日均收+3.8%)")
+            if j < 5:
+                priority_tags.append("❄️深度超卖(20日均收+3.1%)")
+
             # 评分星级
-            if eq >= 7:
+            if eq >= 8:
+                score_star = "★★★"
+            elif eq >= 7:
                 score_star = "★★★"
             elif eq >= 5:
                 score_star = "★★☆"
@@ -949,13 +982,13 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
                 score_star = "★☆☆"
 
             lines.append(f"{'─'*30}")
-            lines.append(f"{i}. {s['name']}({s['code']}) | {s['industry']}")
+            lines.append(f"🔴 {i}. {s['name']}({s['code']}) | {s['industry']}")
+            if priority_tags:
+                lines.append(f"   {' | '.join(priority_tags)}")
             lines.append(f"   入场评分: {eq}/8 {score_star}")
 
             # ── 评分拆解 ──
             score_parts = []
-            ej = s.get('factor_a', False)  # factor_a = vol_stable → E2量能
-            # 重新从原始字段取评分
             ej_score = s.get('eq_j_score', None)
             ev_score = s.get('eq_vol_score', None)
             ec_score = s.get('eq_candle_score', None)
@@ -966,9 +999,8 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
                 score_parts.append(f"E3形态{ec_score}分")
                 score_parts.append(f"E4均线{em_score}分")
             else:
-                # 从factor推断
-                e1 = 2 if s['J'] < 3 else 1 if s['J'] < 10 else 0
-                e2 = 2 if s['vol_ratio'] < 0.3 else 1 if s['vol_ratio'] < 0.5 else 0
+                e1 = 2 if j < 3 else 1 if j < 10 else 0
+                e2 = 2 if vr < 0.3 else 1 if vr < 0.5 else 0
                 score_parts.append(f"E1情绪≈{e1}分")
                 score_parts.append(f"E2量能≈{e2}分")
                 score_parts.append(f"E3形态≈?分")
@@ -987,9 +1019,9 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             lines.append(f"      线距:{ma_dist:.1f}ATR | ATR:{s['atr14']:.2f}")
 
             # ── 核心指标 ──
-            j_label = "极度超卖" if s['J'] < 3 else "超卖" if s['J'] < 10 else "偏低" if s['J'] < 20 else "中性"
-            vol_label = "极度缩量" if s['vol_ratio'] < 0.3 else "明显缩量" if s['vol_ratio'] < 0.5 else "缩量" if s['vol_ratio'] < 0.8 else "放量"
-            lines.append(f"   📉 J值:{s['J']:.1f}({j_label}) | 量比:{s['vol_ratio']:.2f}({vol_label})")
+            j_label = "极度超卖" if j < 3 else "深度超卖" if j < 5 else "超卖" if j < 10 else "偏低" if j < 20 else "中性"
+            vol_label = "极度缩量" if vr < 0.3 else "明显缩量" if vr < 0.5 else "缩量" if vr < 0.8 else "放量"
+            lines.append(f"   📉 J值:{j:.1f}({j_label}) | 量比:{vr:.2f}({vol_label})")
 
             # ── SOS锚定 ──
             if s.get('sos_dates'):
@@ -1019,17 +1051,108 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             # ── 交易参考 ──
             lines.append(f"   💰 T+1参考买入: {s['price']:.2f}(开盘价)")
             lines.append(f"      硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线初始: {s['chandelier_init']:.2f}")
-            # 风险收益比
             risk = s['price'] - s['hard_stop']
             reward = resistance - s['price']
             rr_ratio = reward / risk if risk > 0 else 0
             rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
             lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
 
-            # ── 策略标签 ──
             lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
+            lines.append("")
 
-            # 空行分隔
+        # ── 普通挡 ──
+        if normal_signals:
+            lines.append(f"⚪ 普通挡 ({len(normal_signals)}只)")
+            lines.append(f"   条件: 评分≥5但未达优先挡标准")
+            lines.append("")
+
+        for i, s in enumerate(normal_signals, 1):
+            eq = s.get('entry_quality_score', 0)
+            j = s.get('J', 99)
+            vr = s.get('vol_ratio', 1.0)
+
+            if eq >= 7:
+                score_star = "★★★"
+            elif eq >= 5:
+                score_star = "★★☆"
+            else:
+                score_star = "★☆☆"
+
+            lines.append(f"{'─'*30}")
+            lines.append(f"⚪ {i}. {s['name']}({s['code']}) | {s['industry']}")
+            lines.append(f"   入场评分: {eq}/8 {score_star}")
+
+            # ── 评分拆解 ──
+            score_parts = []
+            ej_score = s.get('eq_j_score', None)
+            ev_score = s.get('eq_vol_score', None)
+            ec_score = s.get('eq_candle_score', None)
+            em_score = s.get('eq_ma_score', None)
+            if all(v is not None for v in [ej_score, ev_score, ec_score, em_score]):
+                score_parts.append(f"E1情绪{ej_score}分")
+                score_parts.append(f"E2量能{ev_score}分")
+                score_parts.append(f"E3形态{ec_score}分")
+                score_parts.append(f"E4均线{em_score}分")
+            else:
+                e1 = 2 if j < 3 else 1 if j < 10 else 0
+                e2 = 2 if vr < 0.3 else 1 if vr < 0.5 else 0
+                score_parts.append(f"E1情绪≈{e1}分")
+                score_parts.append(f"E2量能≈{e2}分")
+                score_parts.append(f"E3形态≈?分")
+                score_parts.append(f"E4均线≈?分")
+            lines.append(f"   拆解: {' | '.join(score_parts)}")
+
+            # ── 价格+涨跌 ──
+            change_sign = "+" if s['change_pct'] >= 0 else ""
+            change_icon = "🔺" if s['change_pct'] >= 0 else "🔻"
+            lines.append(f"   {change_icon} 价格:{s['price']:.2f} | 涨跌:{change_sign}{s['change_pct']:.2f}%")
+
+            # ── 均线结构 ──
+            ma_rel = "白>黄(多头)" if s['white_line'] > s['yellow_line'] else "白<黄(空头)" if s['white_line'] < s['yellow_line'] else "白=黄(收敛)"
+            ma_dist = abs(s['white_line'] - s['yellow_line']) / s['atr14'] if s['atr14'] > 0 else 0
+            lines.append(f"   📏 白线:{s['white_line']:.2f} | 黄线:{s['yellow_line']:.2f} | {ma_rel}")
+            lines.append(f"      线距:{ma_dist:.1f}ATR | ATR:{s['atr14']:.2f}")
+
+            # ── 核心指标 ──
+            j_label = "深度超卖" if j < 5 else "超卖" if j < 10 else "偏低" if j < 20 else "中性"
+            vol_label = "极度缩量" if vr < 0.3 else "明显缩量" if vr < 0.5 else "缩量" if vr < 0.8 else "放量"
+            lines.append(f"   📉 J值:{j:.1f}({j_label}) | 量比:{vr:.2f}({vol_label})")
+
+            # ── SOS锚定 ──
+            if s.get('sos_dates'):
+                lines.append(f"   📍 SOS锚定日: {', '.join(s['sos_dates'])}")
+
+            # ── 威科夫解读 ──
+            analysis = s.get('analysis', {})
+            wyckoff = analysis.get('wyckoff', [])
+            if wyckoff:
+                lines.append(f"   🔍 威科夫: {'; '.join(wyckoff)}")
+
+            # ── VPA量价 ──
+            vpa = analysis.get('vpa', [])
+            if vpa:
+                lines.append(f"   📊 VPA量价: {'; '.join(vpa)}")
+
+            # ── 蜡烛图 ──
+            candle = analysis.get('candle', [])
+            if candle:
+                lines.append(f"   🕯️ 蜡烛图: {'; '.join(candle)}")
+
+            # ── 支撑阻力 ──
+            support = analysis.get('support', s['yellow_line'])
+            resistance = analysis.get('resistance', s['yellow_line'])
+            lines.append(f"   🎯 支撑:{support} | 阻力:{resistance}")
+
+            # ── 交易参考 ──
+            lines.append(f"   💰 T+1参考买入: {s['price']:.2f}(开盘价)")
+            lines.append(f"      硬止损: {s['hard_stop']:.2f}(-15%) | 吊灯线初始: {s['chandelier_init']:.2f}")
+            risk = s['price'] - s['hard_stop']
+            reward = resistance - s['price']
+            rr_ratio = reward / risk if risk > 0 else 0
+            rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
+            lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
+
+            lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
             lines.append("")
 
     # ══════════════════════════════════════
