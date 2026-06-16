@@ -100,6 +100,22 @@ DYNAMIC_SCORE_PARAMS = {
     "j_hard_cap": 10,             # 所有信号J值硬上限
 }
 
+# 季节性风控规则（3年回测验证）
+SEASONAL_RULES = {
+    "danger_months": [3, 5],          # 3月连续3年负收益(均-8%)，5月2年大亏
+    "golden_months": [8, 10],         # 8月/10月连续3年正收益
+    "optimal_hold_days": 10,          # 最优持仓周期10天(10日均收+0.36%峰值)
+}
+
+# 优先挡规则（3年回测验证）
+PRIORITY_TIER_RULES = {
+    "score_8_golden": True,           # 8分黄金信号(胜率50%, 10日均收+2.0%)
+    "vol_extreme_shrink": 0.3,        # 量比<0.3极度缩量(10日均收+3.8%)
+    "j_sweet_spot": (3, 5),           # J值3-5甜区(20日均收+2.0%，优于J<3的-0.09%)
+    "price_sweet_spot": (10, 20),     # 10-20元最佳区间(20日均收+4.1%)
+    "score_7_downgrade": True,        # 7分降级：3年回测7分(-1.43%)不如5分(+0.56%)
+}
+
 # 股票日线数据增量缓存
 from classic_ta.stock_data_duckdb import get_stock_data_cached, get_cache_stats
 
@@ -885,6 +901,19 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     else:
         lines.append("📈 OAMV活筹: 环境评估中")
 
+    # ── 季节性风控提示 ──
+    current_month = datetime.now().month
+    sr = SEASONAL_RULES
+    if current_month in sr["danger_months"]:
+        month_name = f"{current_month}月"
+        if current_month == 3:
+            lines.append(f"   ⛔ 季节性警告: {month_name}连续3年负收益(均-8%)，建议空仓或极轻仓!")
+        elif current_month == 5:
+            lines.append(f"   ⚠️ 季节性警告: {month_name}近3年2年大亏，建议严格控制仓位!")
+    elif current_month in sr["golden_months"]:
+        month_name = f"{current_month}月"
+        lines.append(f"   ✅ 季节性利好: {month_name}连续3年正收益，信号可信度较高")
+
     # ══════════════════════════════════════
     #  三、行业风向
     # ══════════════════════════════════════
@@ -937,16 +966,39 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             lines.append("   OAMV显示资金萎缩，建议空仓观望")
         lines.append("")
     else:
-        # ── 信号分级 ──
+        # ── 信号分级（3年回测验证规则） ──
         priority_signals = []  # 优先考虑挡
         normal_signals = []    # 普通挡
+        ptr = PRIORITY_TIER_RULES
 
         for s in signals:
             eq = s.get('entry_quality_score', 0)
             vr = s.get('vol_ratio', 1.0)
             j = s.get('J', 99)
-            # 优先考虑挡: 8分(黄金信号) / 极度缩量(量比<0.3) / J<5(深度超卖) / 10-20元(最佳价格区间)
-            if eq >= 8 or vr < 0.3 or j < 5 or (10 <= s['price'] <= 20):
+            price = s.get('price', 0)
+
+            # 优先考虑挡条件
+            is_priority = False
+            # 8分黄金信号
+            if ptr["score_8_golden"] and eq >= 8:
+                is_priority = True
+            # 极度缩量
+            if vr < ptr["vol_extreme_shrink"]:
+                is_priority = True
+            # J值3-5甜区（注意：J<3不优先，3年回测J<3收益-0.09%不如J3-5的+2.0%）
+            j_lo, j_hi = ptr["j_sweet_spot"]
+            if j_lo <= j < j_hi:
+                is_priority = True
+            # 10-20元最佳价格区间
+            p_lo, p_hi = ptr["price_sweet_spot"]
+            if p_lo <= price <= p_hi:
+                is_priority = True
+
+            # 7分降级：3年回测7分(-1.43%)不如5分(+0.56%)，7分不进优先挡
+            if ptr["score_7_downgrade"] and eq == 7:
+                is_priority = False
+
+            if is_priority:
                 priority_signals.append(s)
             else:
                 normal_signals.append(s)
@@ -954,7 +1006,8 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
         # ── 优先考虑挡 ──
         if priority_signals:
             lines.append(f"🔴 优先考虑挡 ({len(priority_signals)}只)")
-            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | J<5深度超卖 | 10-20元最佳区间")
+            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | J值3-5甜区 | 10-20元最佳区间")
+            lines.append(f"   注意: 7分信号已降级(3年回测7分不如5分) | J<3不优先(极度超卖可能趋势下跌)")
             lines.append("")
 
         for i, s in enumerate(priority_signals, 1):
@@ -965,11 +1018,12 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             # 优先挡标签
             priority_tags = []
             if eq >= 8:
-                priority_tags.append("⭐8分黄金信号(胜率80%)")
+                priority_tags.append("⭐8分黄金信号(胜率50%)")
             if vr < 0.3:
                 priority_tags.append("💧极度缩量(10日均收+3.8%)")
-            if j < 5:
-                priority_tags.append("❄️深度超卖(20日均收+3.1%)")
+            j_lo, j_hi = PRIORITY_TIER_RULES["j_sweet_spot"]
+            if j_lo <= j < j_hi:
+                priority_tags.append("❄️J值甜区3-5(20日均收+2.0%)")
             if 10 <= s['price'] <= 20:
                 priority_tags.append("💰10-20元最佳区间(20日均收+4.1%)")
 
@@ -1058,6 +1112,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             rr_ratio = reward / risk if risk > 0 else 0
             rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
             lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
+            lines.append(f"      ⏱️ 建议持仓: 10个交易日(3年回测10日均收峰值+0.36%)")
 
             lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
             lines.append("")
@@ -1153,6 +1208,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             rr_ratio = reward / risk if risk > 0 else 0
             rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
             lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
+            lines.append(f"      ⏱️ 建议持仓: 10个交易日(3年回测10日均收峰值+0.36%)")
 
             lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
             lines.append("")
@@ -1164,6 +1220,8 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     lines.append(f"📖 核心逻辑: SOS需求大阳线 → 情绪冰点(J超卖+缩量+小实体) → 潜伏买入")
     lines.append(f"📐 评分体系: E1情绪冰点(0-2) + E2量能枯竭(0-2) + E3盘面形态(0-2) + E4均线结构(0-2)")
     lines.append(f"🛡️ 风控机制: OAMV择时(牛/熊) → 行业动量过滤 → 动态评分门槛 → 4级退出")
+    lines.append(f"⏱️ 持仓周期: 最优10天(3年回测验证，10日均收+0.36%为峰值，20日转负)")
+    lines.append(f"📅 季节性: 3月/5月高危(连续负收益) | 8月/10月黄金(连续正收益)")
     if is_intraday:
         lines.append(f"💡 提示: 盘中扫描量比为部分数据，22:00盘后推送将用完整数据确认")
 
