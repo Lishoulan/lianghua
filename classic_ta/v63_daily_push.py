@@ -111,7 +111,6 @@ SEASONAL_RULES = {
 PRIORITY_TIER_RULES = {
     "score_8_golden": True,           # 8分黄金信号(胜率50%, 10日均收+2.0%)
     "vol_extreme_shrink": 0.3,        # 量比<0.3极度缩量(10日均收+3.8%)
-    "j_sweet_spot": (3, 5),           # J值3-5甜区(20日均收+2.0%，优于J<3的-0.09%)
     "price_sweet_spot": (10, 20),     # 10-20元最佳区间(20日均收+4.1%)
     "score_7_downgrade": True,        # 7分降级：3年回测7分(-1.43%)不如5分(+0.56%)
 }
@@ -985,10 +984,6 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             # 极度缩量
             if vr < ptr["vol_extreme_shrink"]:
                 is_priority = True
-            # J值3-5甜区（注意：J<3不优先，3年回测J<3收益-0.09%不如J3-5的+2.0%）
-            j_lo, j_hi = ptr["j_sweet_spot"]
-            if j_lo <= j < j_hi:
-                is_priority = True
             # 10-20元最佳价格区间
             p_lo, p_hi = ptr["price_sweet_spot"]
             if p_lo <= price <= p_hi:
@@ -1006,7 +1001,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
         # ── 优先考虑挡 ──
         if priority_signals:
             lines.append(f"🔴 优先考虑挡 ({len(priority_signals)}只)")
-            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | J值3-5甜区 | 10-20元最佳区间")
+            lines.append(f"   条件: 8分黄金信号 | 量比<0.3极度缩量 | 10-20元最佳区间")
             lines.append(f"   注意: 7分信号已降级(3年回测7分不如5分) | J<3不优先(极度超卖可能趋势下跌)")
             lines.append("")
 
@@ -1021,9 +1016,6 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
                 priority_tags.append("⭐8分黄金信号(胜率50%)")
             if vr < 0.3:
                 priority_tags.append("💧极度缩量(10日均收+3.8%)")
-            j_lo, j_hi = PRIORITY_TIER_RULES["j_sweet_spot"]
-            if j_lo <= j < j_hi:
-                priority_tags.append("❄️J值甜区3-5(20日均收+2.0%)")
             if 10 <= s['price'] <= 20:
                 priority_tags.append("💰10-20元最佳区间(20日均收+4.1%)")
 
@@ -1113,6 +1105,13 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
             lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
             lines.append(f"      ⏱️ 建议持仓: 10个交易日(3年回测10日均收峰值+0.36%)")
+            # 仓位管理提示（优先挡）
+            pos_tip = "标准仓10%"
+            if vr < 0.3:
+                pos_tip = "极度缩量可加仓至15%"
+            elif eq >= 8:
+                pos_tip = "8分黄金可加仓至15%"
+            lines.append(f"      📦 仓位建议: {pos_tip} | 单只上限15% | 总敞口≤50%")
 
             lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
             lines.append("")
@@ -1209,6 +1208,8 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
             rr_label = "优" if rr_ratio >= 3 else "良" if rr_ratio >= 2 else "一般" if rr_ratio >= 1 else "差"
             lines.append(f"      风险收益比: 1:{rr_ratio:.1f}({rr_label}) | 亏损空间:{risk/s['price']*100:.1f}%")
             lines.append(f"      ⏱️ 建议持仓: 10个交易日(3年回测10日均收峰值+0.36%)")
+            # 仓位管理提示（普通挡）
+            lines.append(f"      📦 仓位建议: 减仓5% | 单只上限10% | 总敞口≤50%")
 
             lines.append(f"   🏷️ 潜伏模型V6.4 | 威科夫LPS+VPA | 4级退出(硬止损→吊灯→BC→时间)")
             lines.append("")
@@ -1221,6 +1222,7 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     lines.append(f"📐 评分体系: E1情绪冰点(0-2) + E2量能枯竭(0-2) + E3盘面形态(0-2) + E4均线结构(0-2)")
     lines.append(f"🛡️ 风控机制: OAMV择时(牛/熊) → 行业动量过滤 → 动态评分门槛 → 4级退出")
     lines.append(f"⏱️ 持仓周期: 最优10天(3年回测验证，10日均收+0.36%为峰值，20日转负)")
+    lines.append(f"📦 仓位管理: 单只≤15%(优先挡)/≤10%(普通挡) | 总敞口≤50% | 极度缩量可加仓")
     lines.append(f"📅 季节性: 3月/5月高危(连续负收益) | 8月/10月黄金(连续正收益)")
     if is_intraday:
         lines.append(f"💡 提示: 盘中扫描量比为部分数据，22:00盘后推送将用完整数据确认")
