@@ -57,6 +57,7 @@ jobs:
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          SERVERCHAN_KEY_BETA: ${{ secrets.SERVERCHAN_KEY_BETA }}
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             echo "Dry run mode - skipping push"

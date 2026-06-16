@@ -54,7 +54,12 @@ def _get_pro():
         raise ValueError("TUSHARE_TOKEN环境变量未设置")
     return ts.pro_api(TUSHARE_TOKEN)
 
-SERVERCHAN_KEYS = [k.strip() for k in os.getenv("SERVERCHAN_KEY", "").split(",") if k.strip()]
+# 推送分组配置
+SERVERCHAN_KEYS_ADMIN = [k.strip() for k in os.getenv("SERVERCHAN_KEY", "").split(",") if k.strip()]
+SERVERCHAN_KEYS_BETA = [k.strip() for k in os.getenv("SERVERCHAN_KEY_BETA", "").split(",") if k.strip()]
+
+# 兼容旧变量名
+SERVERCHAN_KEYS = SERVERCHAN_KEYS_ADMIN
 
 RESULT_DIR = Path(__file__).parent.parent / "results" / "v63_daily"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
@@ -123,12 +128,15 @@ from classic_ta.stock_data_duckdb import get_stock_data_cached, get_cache_stats
 #  Server酱推送
 # ══════════════════════════════════════════════════════════
 
-def send_serverchan(title, desp):
-    if not SERVERCHAN_KEYS:
-        print("SERVERCHAN_KEY未配置，跳过推送")
+def send_serverchan(title, desp, keys=None):
+    """Server酱推送，支持指定key列表（分组推送）"""
+    if keys is None:
+        keys = SERVERCHAN_KEYS_ADMIN
+    if not keys:
+        print("  Server酱推送: 无可用Key，跳过")
         return False
     success_count = 0
-    for key in SERVERCHAN_KEYS:
+    for key in keys:
         url = f"https://sctapi.ftqq.com/{key}.send"
         data = {"title": title, "desp": desp}
         try:
@@ -139,8 +147,31 @@ def send_serverchan(title, desp):
                     success_count += 1
         except Exception as e:
             print(f"  Server酱推送失败: {e}")
-    print(f"  Server酱推送: {success_count}/{len(SERVERCHAN_KEYS)}")
+    print(f"  Server酱推送: {success_count}/{len(keys)}")
     return success_count > 0
+
+
+def send_group_push(admin_title, admin_desp, beta_title, beta_desp):
+    """分组推送：管理员组（完整技术版）+ 内测组（精简卡片版）"""
+    results = {}
+
+    # 管理员组推送
+    if SERVERCHAN_KEYS_ADMIN:
+        print(f"\n推送管理员组 ({len(SERVERCHAN_KEYS_ADMIN)}个Key)...")
+        results["admin"] = send_serverchan(admin_title, admin_desp, keys=SERVERCHAN_KEYS_ADMIN)
+    else:
+        print("  管理员组: 无Key配置，跳过")
+        results["admin"] = False
+
+    # 内测组推送
+    if SERVERCHAN_KEYS_BETA:
+        print(f"\n推送内测组 ({len(SERVERCHAN_KEYS_BETA)}个Key)...")
+        results["beta"] = send_serverchan(beta_title, beta_desp, keys=SERVERCHAN_KEYS_BETA)
+    else:
+        print("  内测组: 无Key配置，跳过")
+        results["beta"] = False
+
+    return results
 
 
 # ══════════════════════════════════════════════════════════
@@ -1240,6 +1271,147 @@ def build_push_message(oamv_status, signals, industry_stats, is_intraday=False):
     return title, desp
 
 
+def build_beta_push_message(oamv_status, signals, industry_stats, is_intraday=False):
+    """
+    内测组推送消息（精简卡片式）
+    - 去掉技术细节（威科夫/VPA/蜡烛图/评分拆解）
+    - 只保留核心：股票名、价格、评分、仓位建议、止损位
+    - 产品级简洁风格，适合普通订阅用户
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    weekday_cn = ["周一","周二","周三","周四","周五","周六","周日"][datetime.now().weekday()]
+
+    # 市场情绪
+    if oamv_status:
+        can_open = oamv_status["can_open_position"]
+        sentiment = "偏多" if can_open else "偏空"
+        sentiment_icon = "🟢" if can_open else "🔴"
+    else:
+        can_open = True
+        sentiment = "中性"
+        sentiment_icon = "⚪"
+
+    mode_tag = "盘中" if is_intraday else "盘后"
+    title = f"{sentiment_icon} 量化潜伏 {today} | {len(signals)}只 | {sentiment} | {mode_tag}"
+
+    lines = []
+
+    # ── 今日概览 ──
+    lines.append(f"📊 {today} {weekday_cn} | {mode_tag}版")
+    if is_intraday:
+        lines.append(f"⏰ 数据截至 {datetime.now().strftime('%H:%M')}")
+    lines.append(f"📈 市场情绪: {sentiment_icon}{sentiment}")
+
+    # ── 季节性提示 ──
+    current_month = datetime.now().month
+    sr = SEASONAL_RULES
+    if current_month in sr["danger_months"]:
+        lines.append(f"⚠️ {current_month}月历史表现偏弱，建议控制仓位")
+    elif current_month in sr["golden_months"]:
+        lines.append(f"✅ {current_month}月历史表现较好，信号可信度较高")
+
+    # ── 行业风向（精简） ──
+    if industry_stats:
+        hot = [s for s in industry_stats if s["momentum"] > 0]
+        rotation_in = [s for s in industry_stats if s["rotation"] == "轮入"]
+        if hot:
+            lines.append(f"🔥 热门行业: {'、'.join(s['name'] for s in hot[:5])}")
+        if rotation_in:
+            lines.append(f"🔄 轮入: {'、'.join(s['name'] for s in rotation_in[:3])}")
+
+    # ── 信号分级 ──
+    if not signals:
+        lines.append("")
+        if can_open:
+            lines.append("📭 今日暂无符合条件的标的，耐心等待")
+        else:
+            lines.append("🛡️ 市场偏弱，建议观望")
+    else:
+        priority_signals = []
+        normal_signals = []
+        ptr = PRIORITY_TIER_RULES
+
+        for s in signals:
+            eq = s.get('entry_quality_score', 0)
+            vr = s.get('vol_ratio', 1.0)
+            price = s.get('price', 0)
+
+            is_priority = False
+            if ptr["score_8_golden"] and eq >= 8:
+                is_priority = True
+            if vr < ptr["vol_extreme_shrink"]:
+                is_priority = True
+            p_lo, p_hi = ptr["price_sweet_spot"]
+            if p_lo <= price <= p_hi:
+                is_priority = True
+            if ptr["score_7_downgrade"] and eq == 7:
+                is_priority = False
+
+            if is_priority:
+                priority_signals.append(s)
+            else:
+                normal_signals.append(s)
+
+        # ── 优先挡（精简卡片） ──
+        if priority_signals:
+            lines.append("")
+            lines.append(f"━━━ 重点推荐 ({len(priority_signals)}只) ━━━")
+            for i, s in enumerate(priority_signals, 1):
+                eq = s.get('entry_quality_score', 0)
+                vr = s.get('vol_ratio', 1.0)
+                j = s.get('J', 99)
+
+                # 标签
+                tags = []
+                if eq >= 8:
+                    tags.append("⭐8分")
+                if vr < 0.3:
+                    tags.append("💧极度缩量")
+                if 10 <= s['price'] <= 20:
+                    tags.append("💰最佳区间")
+
+                # 仓位建议
+                if vr < 0.3 or eq >= 8:
+                    pos = "仓位15%"
+                else:
+                    pos = "仓位10%"
+
+                change_sign = "+" if s['change_pct'] >= 0 else ""
+                lines.append(f"{i}. {s['name']}({s['code']}) {s['price']:.2f} {change_sign}{s['change_pct']:.2f}%")
+                if tags:
+                    lines.append(f"   {' '.join(tags)}")
+                lines.append(f"   评分:{eq}/8 | J:{j:.0f} | 量比:{vr:.2f} | {pos}")
+                lines.append(f"   止损:{s['hard_stop']:.2f} | 持仓10天")
+                lines.append("")
+
+        # ── 普通挡（精简卡片） ──
+        if normal_signals:
+            lines.append(f"━━━ 关注标的 ({len(normal_signals)}只) ━━━")
+            for i, s in enumerate(normal_signals, 1):
+                eq = s.get('entry_quality_score', 0)
+                vr = s.get('vol_ratio', 1.0)
+                j = s.get('J', 99)
+
+                change_sign = "+" if s['change_pct'] >= 0 else ""
+                lines.append(f"{i}. {s['name']}({s['code']}) {s['price']:.2f} {change_sign}{s['change_pct']:.2f}%")
+                lines.append(f"   评分:{eq}/8 | J:{j:.0f} | 量比:{vr:.2f} | 仓位5%")
+                lines.append(f"   止损:{s['hard_stop']:.2f} | 持仓10天")
+                lines.append("")
+
+    # ── 仓位管理 ──
+    lines.append(f"━━━ 仓位管理 ━━━")
+    lines.append(f"单只≤15%(推荐)/≤10%(关注) | 总敞口≤50%")
+    lines.append(f"持仓周期: 10个交易日")
+
+    # ── 免责声明 ──
+    lines.append("")
+    lines.append(f"⚠️ 量化系统自动输出，不构成投资建议")
+    lines.append(f"⚡ 量化潜伏 Pro | V6.4")
+
+    desp = "\n".join(lines)
+    return title, desp
+
+
 # ══════════════════════════════════════════════════════════
 #  主流程
 # ══════════════════════════════════════════════════════════
@@ -1392,9 +1564,10 @@ def daily_push():
         print(f"  OAMV状态: {'牛市' if is_bull else '熊市'} | "
               f"规则: {'评分≥5或(4+J<3+量比<0.6)' if is_bull else '评分≥6'} | J<10", flush=True)
 
-    # 构建推送消息
+    # 构建推送消息（两组格式）
     print("\n构建推送消息...", flush=True)
-    title, desp = build_push_message(oamv_status, signals, industry_stats, is_intraday=is_intraday)
+    admin_title, admin_desp = build_push_message(oamv_status, signals, industry_stats, is_intraday=is_intraday)
+    beta_title, beta_desp = build_beta_push_message(oamv_status, signals, industry_stats, is_intraday=is_intraday)
 
     # 保存结果
     result = {
@@ -1419,10 +1592,11 @@ def daily_push():
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     print(f"  结果已保存: {result_file}", flush=True)
 
-    # 推送
-    print("\n推送微信...", flush=True)
-    send_serverchan(title, desp)
-    print("推送完成", flush=True)
+    # 分组推送
+    print("\n分组推送微信...", flush=True)
+    push_results = send_group_push(admin_title, admin_desp, beta_title, beta_desp)
+    print(f"推送完成: 管理员组={'成功' if push_results.get('admin') else '跳过/失败'} | "
+          f"内测组={'成功' if push_results.get('beta') else '跳过/失败'}", flush=True)
 
     # 摘要
     print(f"\n{'='*80}")
