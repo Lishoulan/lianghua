@@ -1,11 +1,12 @@
-name: V6.4 Daily Push (Fine Dynamic Score)
+name: Daily Push
 
 on:
   schedule:
-    # 北京时间12:55 = UTC 04:55（盘中扫描，提前1小时确保准时）
-    - cron: '55 4 * * 1-5'
-    # 北京时间20:55 = UTC 12:55（盘后推送，提前1小时确保准时）
-    - cron: '55 12 * * 1-5'
+    # 提前触发，确保扫描完成后准时投递
+    # 盘中扫描: 北京时间12:30 = UTC 04:30 → 13:00准时到达微信
+    - cron: '30 4 * * 1-5'
+    # 盘后推送: 北京时间20:30 = UTC 12:30 → 21:00准时到达微信
+    - cron: '30 12 * * 1-5'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -53,7 +54,7 @@ jobs:
           print(f'Cache status: {stats.get(\"count\",0)} stocks, {stats.get(\"size_mb\",0)}MB')
           "
 
-      - name: Run V6.4 Daily Push (Fine Dynamic Score)
+      - name: Run Daily Push
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
@@ -65,14 +66,9 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            echo "Dry run mode - skipping push"
-            python -c "
-            import sys; sys.path.insert(0,'.')
-            from classic_ta.v63_daily_push import scan_market, build_push_message, get_oamv_status, apply_dynamic_score_filter
-            print('Dry run: modules loaded successfully')
-            "
+            python classic_ta/daily_push.py --dry-run
           else
-            python -u classic_ta/v63_daily_push.py
+            python -u classic_ta/daily_push.py
           fi
 
       - name: Upload results
@@ -80,5 +76,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: push-results-${{ steps.date.outputs.today }}
-          path: results/v63_daily/
+          path: results/daily/
           retention-days: 30

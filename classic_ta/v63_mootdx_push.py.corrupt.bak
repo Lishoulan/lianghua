@@ -1,7 +1,7 @@
 """
-潜伏模型V6.2 盘前扫描推送
+潜伏模型V6.3 盘前扫描推送 - 含波动率平价仓位
 ==========================================================
-基于V6.2最佳参数 + 行业动量过滤 + OAMV择时
+基于V6.3最佳参数 + 行业动量过滤 + OAMV择时 + 微观确认 + 波动率平价仓位
 使用akshare数据源（前复权）+ 并发获取 + 批量预筛选
 
 推送内容：
@@ -58,16 +58,22 @@ SERVERCHAN_KEYS = [k.strip() for k in os.getenv("SERVERCHAN_KEY", "").split(",")
 RESULT_DIR = Path(__file__).parent.parent / "results" / "v63_mootdx"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ─── V6.2模型 ───
+# ─── V6.3模型 ───
 from classic_ta.v60_ambush_model import IndicatorCalcBase, DEFAULT_PARAMS
-from classic_ta.v61_ambush_model import (
-    Detect_AmbushSignal_V61, V61_PARAMS,
-)
+from classic_ta.v61_ambush_model import V61_PARAMS
 from classic_ta.v62_ambush_model import (
-    compute_industry_momentum, build_industry_allow_matrix, V62_PARAMS,
+    compute_industry_momentum, build_industry_allow_matrix,
+)
+from classic_ta.v63_ambush_model import (
+    Detect_AmbushSignal_V63, add_micro_confirm_indicators,
+    calc_volatility_parity_shares, V63_PARAMS,
+)
+from classic_ta.v64_ambush_model import (
+    add_inst_support_indicators, Detect_AmbushSignal_V64,
+    V64_PARAMS,
 )
 
-BEST_PARAMS = V62_PARAMS.copy()
+BEST_PARAMS = V64_PARAMS.copy()
 
 # ══════════════════════════════════════════════════════════
 #  Mootdx测速优选
@@ -282,7 +288,9 @@ def _fetch_and_process_one_core(ts_code, name, industry, best_params):
     if df is None:
         return (ts_code, name, industry, None)
     df = IndicatorCalcBase(df)
-    df = Detect_AmbushSignal_V61(df, best_params)
+    df = add_micro_confirm_indicators(df)
+    df = add_inst_support_indicators(df, best_params)
+    df = Detect_AmbushSignal_V64(df, best_params)
     if df is None or len(df) < 130:
         return (ts_code, name, industry, None)
     return (ts_code, name, industry, df)
@@ -305,7 +313,7 @@ def _fetch_and_process_one(ts_code, name, industry, best_params):
 
     健壮性保证：
     - 单只股票计算崩溃仅记录ERROR日志，绝对不阻断其他股票
-    - 对Detect_AmbushSignal_V61的调用包裹try...except
+    - 对Detect_AmbushSignal_V64的调用包裹try...except
     - 网络异常自动重试3次（需安装tenacity）
     """
     try:
@@ -671,7 +679,7 @@ def scan_market(max_stocks=None, industry_allow_matrix=None, industry_map=None, 
                 continue
 
             if latest.get("ambush_signal", False):
-                # V6.2：行业热度过滤
+                # V6.3：行业热度过滤
                 signal_date = df.index[-1]
                 ind_allowed = True
                 if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
@@ -711,6 +719,12 @@ def scan_market(max_stocks=None, industry_allow_matrix=None, industry_map=None, 
                     "sos_dates": sos_dates,
                     "analysis": detail,
                     "signal_date": signal_date.strftime("%Y-%m-%d"),
+                    # V6.4：主力托底评分
+                    "inst_support_score": int(latest.get("inst_support_score", 0)),
+                    "factor_a": bool(latest.get("factor_a_vol_stable", False)),
+                    "factor_b": bool(latest.get("factor_b_vp_divergence", False)),
+                    "factor_c": bool(latest.get("factor_c_support_hold", False)),
+                    "factor_d": bool(latest.get("factor_d_intraday_accum", False)),
                 }
                 signals.append(signal_info)
                 logger.info(f"潜伏信号: {name}({ts_code}) [{industry}] {latest['Close']:.2f} "
@@ -828,8 +842,19 @@ def build_push_message(oamv_status, signals, industry_stats):
         parts.append(f"今日筛选 **{len(signals)}** 只:")
         parts.append("")
         for i, s in enumerate(signals, 1):
+            score = s.get('inst_support_score', 0)
+            score_bar = '★' * score + '☆' * (3 - score)
+            factors = []
+            if s.get('factor_b'):
+                factors.append('量价背离')
+            if s.get('factor_c'):
+                factors.append('支撑不破')
+            if s.get('factor_d'):
+                factors.append('日内承接')
+            factor_str = '+'.join(factors) if factors else '无'
             parts.append(f"**{i}. {s['name']}** ({s['code']}) [{s['industry']}]")
             parts.append(f"  收盘 {s['price']:.2f} | {s['change_pct']:+.2f}% | 量比 {s['vol_ratio']:.2f}")
+            parts.append(f"  托底评分 {score_bar} ({score}/3) | {factor_str}")
             parts.append("")
     else:
         if can_open:
@@ -855,7 +880,7 @@ def build_push_message(oamv_status, signals, industry_stats):
 
 def daily_push(max_stocks=None):
     logger.info("=" * 60)
-    logger.info("潜伏模型V6.2 盘前扫描推送 (Mootdx版)")
+    logger.info("潜伏模型V6.4.5 盘前扫描推送 (Mootdx版+主力托底)")
     logger.info(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
 
@@ -928,7 +953,7 @@ def daily_push(max_stocks=None):
     # 保存结果
     result = {
         "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "version": "V6.2",
+        "version": "V6.4.5",
         "data_source": "akshare",
         "oamv_status": oamv_status,
         "signal_count": len(signals),
@@ -957,7 +982,7 @@ def daily_push(max_stocks=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="潜伏模型V6.2 盘前扫描推送 (Mootdx版)")
+    parser = argparse.ArgumentParser(description="潜伏模型V6.4.5 盘前扫描推送 (Mootdx版+主力托底)")
     parser.add_argument("--test", type=int, default=None, help="测试模式：仅扫描前N只股票")
     args = parser.parse_args()
 
