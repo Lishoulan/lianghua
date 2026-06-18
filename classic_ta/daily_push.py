@@ -217,6 +217,15 @@ def prewarm_data():
 # ══════════════════════════════════════════════════════════
 
 def daily_push():
+    import time as _time
+    _push_start = _time.time()
+
+    def _step_time(step_name, step_start):
+        """打印步骤耗时"""
+        elapsed = _time.time() - step_start
+        total_elapsed = _time.time() - _push_start
+        print(f"  ⏱️ {step_name}耗时: {elapsed:.1f}s (总耗时: {total_elapsed:.0f}s)", flush=True)
+
     print("=" * 80, flush=True)
     print("潜伏模型V6.4 每日实盘推送（精细动态评分版）", flush=True)
     print(f"启动时间: {datetime.now(_BJT).strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
@@ -230,7 +239,9 @@ def daily_push():
         return
 
     # 0. 数据预热
+    _t = _time.time()
     prewarm_data()
+    _step_time("数据预热", _t)
 
     # 0.5 判断盘中/盘后模式
     now = datetime.now(_BJT)
@@ -238,6 +249,7 @@ def daily_push():
     print(f"\n>>> {'盘中实时模式' if is_intraday else '盘后完整模式'} <<<", flush=True)
 
     # 1. OAMV活跃市值择时
+    _t = _time.time()
     print("\n[1/6] 计算OAMV活跃市值择时...", flush=True)
     oamv_status = get_oamv_status()
     if oamv_status:
@@ -246,8 +258,10 @@ def daily_push():
               f"OAMV={oamv_status.get('latest_x', '?')} | {oamv_status.get('trend_label', '')}", flush=True)
     else:
         print("  OAMV计算失败", flush=True)
+    _step_time("OAMV择时", _t)
 
     # 2. 获取行业分类
+    _t = _time.time()
     print("\n[2/6] 获取行业分类...", flush=True)
     try:
         import tushare as ts
@@ -258,8 +272,10 @@ def daily_push():
     except Exception as e:
         print(f"  行业分类获取失败: {e}", flush=True)
         industry_map = {}
+    _step_time("行业分类", _t)
 
     # 3. 盘中模式：获取实时行情
+    _t = _time.time()
     realtime_quotes = None
     if is_intraday:
         print("\n[3/6] 获取akshare实时行情（盘中拼接）...", flush=True)
@@ -271,23 +287,31 @@ def daily_push():
             is_intraday = False
     else:
         print("\n[3/6] 盘后模式，跳过实时行情获取", flush=True)
+    _step_time("实时行情", _t)
 
-    # 4. 全市场扫描
+    # 4. 全市场扫描（核心耗时步骤）
+    _t = _time.time()
     print("\n[4/6] 全市场扫描潜伏信号...", flush=True)
     cache_stats = get_cache_stats()
     print(f"  股票缓存: {cache_stats.get('count', 0)}只 | {cache_stats.get('size_mb', 0)}MB", flush=True)
     print("  批量预筛选全市场行情...", flush=True)
     prefilter_df = batch_prefilter_stocks()
+    if prefilter_df is not None:
+        print(f"  预筛选结果: {len(prefilter_df)}只股票通过初筛", flush=True)
+    else:
+        print(f"  预筛选失败，将扫描全市场", flush=True)
 
-    scanner = SyncScanner(BEST_PARAMS, result_dir=RESULT_DIR)
+    scanner = SyncScanner(BEST_PARAMS, result_dir=RESULT_DIR, scan_timeout_sec=900)
     signals, all_signals_data = scanner.scan(
         industry_allow_matrix=None,
         industry_map=industry_map,
         prefilter_df=prefilter_df,
         realtime_quotes=realtime_quotes,
     )
+    _step_time("全市场扫描", _t)
 
     # 5. 行业热度分析 + 行业过滤
+    _t = _time.time()
     print("\n[5/6] 行业热度分析...", flush=True)
     industry_stats = []
     industry_allow_matrix = None
@@ -315,8 +339,10 @@ def daily_push():
             filtered_signals.append(s)
         print(f"  行业过滤: {len(signals)}只 → {len(filtered_signals)}只", flush=True)
         signals = filtered_signals
+    _step_time("行业分析", _t)
 
     # 6. 精细动态评分过滤
+    _t = _time.time()
     print("\n[6/6] 精细动态评分过滤...", flush=True)
     before_dynamic = len(signals)
     signals = apply_dynamic_score_filter(signals, oamv_status, DYNAMIC_SCORE_PARAMS)
@@ -325,6 +351,7 @@ def daily_push():
         is_bull = oamv_status.get("can_open_position", False)
         print(f"  OAMV状态: {'牛市' if is_bull else '熊市'} | "
               f"规则: {'评分≥5或(4+J<5+量比<0.6)' if is_bull else '评分≥6'} | J<5", flush=True)
+    _step_time("动态评分", _t)
 
     # 构建推送消息（两组格式）
     print("\n构建推送消息...", flush=True)

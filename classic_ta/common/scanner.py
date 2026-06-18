@@ -174,9 +174,10 @@ class SyncScanner:
       - 行业过滤 + 入场质量评分过滤
     """
 
-    def __init__(self, best_params, result_dir=None, max_workers=10):
+    def __init__(self, best_params, result_dir=None, max_workers=10, scan_timeout_sec=900):
         self.best_params = best_params
         self.max_workers = max_workers
+        self.scan_timeout_sec = scan_timeout_sec  # 全局扫描超时（秒），默认15分钟
         self.result_dir = result_dir or Path(__file__).parent.parent.parent / "results" / "v63_daily"
         self.result_dir = Path(self.result_dir)
         self.result_dir.mkdir(parents=True, exist_ok=True)
@@ -271,13 +272,21 @@ class SyncScanner:
 
         is_intraday = realtime_quotes is not None and len(realtime_quotes) > 0
         total = len(all_stocks)
+        # 全局扫描超时（秒）：防止在GitHub Actions中因缓存冷启动导致扫描超30分钟被取消
+        scan_timeout_sec = getattr(self, 'scan_timeout_sec', 900)  # 默认15分钟
+
+        print(f"  🔍 扫描开始: {total}只股票 | 并发:{self.max_workers} | "
+              f"模式:{'盘中实时' if is_intraday else '盘后完整'} | "
+              f"超时:{scan_timeout_sec//60}min", flush=True)
         logger.info(f"扫描股票数: {total} | 并发数: {self.max_workers} | 模式: {'盘中实时' if is_intraday else '盘后完整'}")
 
         signals = []
         all_signals_data = {}
         processed = 0
         errors = 0
+        cache_miss = 0
         start_time = time.time()
+        timed_out = False
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {}
@@ -291,21 +300,37 @@ class SyncScanner:
                 ts_code, name, industry = futures[future]
                 processed += 1
 
-                if processed % 200 == 0:
+                # 进度输出（每100只 + flush，确保GitHub Actions可见）
+                if processed % 100 == 0 or processed == total:
                     elapsed = time.time() - start_time
-                    eta = elapsed / processed * (total - processed) if processed > 0 else 0
-                    logger.info(f"进度: {processed}/{total} ({processed / total * 100:.1f}%) | "
-                                f"信号:{len(signals)} | 失败:{errors} | ETA:{eta:.0f}s")
+                    speed = processed / elapsed if elapsed > 0 else 0
+                    eta = (total - processed) / speed if speed > 0 else 0
+                    print(f"  📊 进度: {processed}/{total} ({processed/total*100:.0f}%) | "
+                          f"信号:{len(signals)} 缓存缺失:{cache_miss} 错误:{errors} | "
+                          f"速度:{speed:.0f}只/s | ETA:{eta:.0f}s | 已耗时:{elapsed:.0f}s", flush=True)
+
+                # 超时检查
+                if time.time() - start_time > scan_timeout_sec:
+                    print(f"  ⚠️ 扫描超时({scan_timeout_sec//60}min)，已处理{processed}/{total}只，"
+                          f"提前终止（已发现{len(signals)}只信号）", flush=True)
+                    timed_out = True
+                    # 取消尚未开始的futures
+                    for f in futures:
+                        f.cancel()
+                    break
 
                 try:
-                    result_ts_code, result_name, result_industry, df = future.result()
+                    result_ts_code, result_name, result_industry, df = future.result(timeout=30)
                 except Exception:
                     errors += 1
                     completed_set.add(ts_code)
                     continue
 
                 if df is None:
-                    errors += 1
+                    if result_ts_code:  # 缓存缺失（非异常）
+                        cache_miss += 1
+                    else:
+                        errors += 1
                     completed_set.add(ts_code)
                     continue
 
@@ -329,12 +354,23 @@ class SyncScanner:
                             continue
 
                     signals.append(signal_info)
-                    logger.info(f"潜伏信号: {name}({ts_code}) [{industry}] "
-                                f"{signal_info['price']:.2f} J:{signal_info['J']:.1f} "
-                                f"量比:{signal_info['vol_ratio']:.2f} 评分:{signal_info['entry_quality_score']}")
+                    print(f"  🎯 潜伏信号: {name}({ts_code}) [{industry}] "
+                          f"{signal_info['price']:.2f} J:{signal_info['J']:.1f} "
+                          f"量比:{signal_info['vol_ratio']:.2f} 评分:{signal_info['entry_quality_score']}", flush=True)
 
         elapsed = time.time() - start_time
+        timeout_note = " (超时截断)" if timed_out else ""
+        print(f"  ✅ 扫描完成{timeout_note}: 耗时{elapsed/60:.1f}min | "
+              f"处理{processed}/{total} | 信号:{len(signals)}只 | "
+              f"缓存缺失:{cache_miss} | 错误:{errors}", flush=True)
         logger.info(f"扫描完成! 耗时: {elapsed / 60:.1f}min | 信号: {len(signals)}只 | 错误: {errors}")
+
+        # 清理线程本地DuckDB连接池
+        try:
+            from classic_ta.stock_data_duckdb import close_thread_local_conns
+            close_thread_local_conns()
+        except Exception:
+            pass
 
         self._clear_scan_status()
         # 扫描完成后，单线程批量补全缓存缺失

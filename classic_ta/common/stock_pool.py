@@ -84,9 +84,12 @@ def batch_prefilter_stocks():
     """
     try:
         import akshare as ak
+        print("  📡 正在获取akshare全市场行情（预筛选）...", flush=True)
         df = ak.stock_zh_a_spot_em()
         if df is None or len(df) == 0:
+            print("  ⚠️ akshare返回空数据", flush=True)
             return None
+        print(f"  📡 获取到{len(df)}只股票行情", flush=True)
 
         # 基本过滤
         df = df[~df["名称"].str.startswith("ST", na=False)]
@@ -121,9 +124,11 @@ def batch_prefilter_stocks():
             df = df[df["涨跌幅"] > -5]
 
         logger.info(f"批量预筛选: {len(df)}只（排除ST/停牌/北交所/已大涨/极端价格/低换手）")
+        print(f"  ✅ 预筛选完成: {len(df)}只通过初筛", flush=True)
         return df
     except Exception as e:
         logger.warning(f"批量预筛选失败: {e}")
+        print(f"  ❌ 预筛选失败: {e}", flush=True)
         return None
 
 

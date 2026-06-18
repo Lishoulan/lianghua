@@ -68,7 +68,7 @@ jobs:
     needs: check-duplicate
     if: needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -166,11 +166,11 @@ jobs:
           path: results/daily/
           retention-days: 30
 
-  # ── 失败重试：如果主任务失败，5分钟后自动重试一次 ──
+  # ── 失败重试：主任务失败或超时取消后自动重试一次 ──
   retry-push:
     name: Retry if failed
     needs: [check-duplicate, daily-push]
-    if: failure() && needs.check-duplicate.outputs.should_run == 'true'
+    if: (failure() || cancelled()) && needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -230,7 +230,7 @@ jobs:
   alert-on-failure:
     name: Alert on persistent failure
     needs: [check-duplicate, daily-push, retry-push]
-    if: failure() && needs.check-duplicate.outputs.should_run == 'true'
+    if: (failure() || cancelled()) && needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     permissions:
       issues: write
