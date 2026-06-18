@@ -3,13 +3,13 @@ name: Daily Push
 on:
   schedule:
     # ── 错峰触发：避开整点/半点高峰，GitHub Actions高峰期延迟5-30分钟 ──
-    # 盘中扫描: 北京时间12:15 = UTC 04:15 → 扫描约20分钟 → 13:00准时到达微信
-    - cron: '15 4 * * 1-5'
-    # 盘后推送: 北京时间20:15 = UTC 12:15 → 扫描约20分钟 → 21:00准时到达微信
-    - cron: '15 12 * * 1-5'
+    # 盘中扫描: 北京时间13:30 = UTC 05:30 → 扫描约20分钟 → 13:50完成 → Server酱定时投递14:15到达微信
+    - cron: '30 5 * * 1-5'
+    # 盘后推送: 北京时间17:30 = UTC 09:30 → 扫描约20分钟 → 17:50完成 → Server酱定时投递18:15到达微信
+    - cron: '30 9 * * 1-5'
     # ── 备用触发：主触发后15分钟，如果主触发失败则备用触发兜底 ──
-    - cron: '30 4 * * 1-5'
-    - cron: '30 12 * * 1-5'
+    - cron: '45 5 * * 1-5'
+    - cron: '45 9 * * 1-5'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -207,3 +207,104 @@ jobs:
           name: push-retry-${{ steps.date.outputs.today }}-${{ needs.check-duplicate.outputs.time_slot }}
           path: results/daily/
           retention-days: 30
+
+  # ── 最终失败告警：重试仍失败时创建 Issue 通知 ──
+  alert-on-failure:
+    name: Alert on persistent failure
+    needs: [check-duplicate, daily-push, retry-push]
+    if: failure() && needs.check-duplicate.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create failure alert issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().slice(0, 10);
+            const slot = '${{ needs.check-duplicate.outputs.time_slot }}';
+            const slotCn = slot === 'intraday' ? '盘中' : slot === 'after_hours' ? '盘后' : '未知';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // 查找是否已有同日未关闭的告警 Issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['push-failure', 'auto-alert'],
+              per_page: 50
+            });
+
+            const existing = issues.data.find(i =>
+              i.title.includes(date) && i.title.includes(slotCn)
+            );
+
+            const body = [
+              `## 推送失败告警`,
+              ``,
+              `| 项目 | 值 |`,
+              `|------|-----|`,
+              `| 日期 | ${date} |`,
+              `| 时段 | ${slotCn} (${slot}) |`,
+              `| 运行链接 | [查看](${runUrl}) |`,
+              `| 触发时间 | ${new Date().toISOString()} |`,
+              ``,
+              `### 排查建议`,
+              `1. 检查 [运行日志](${runUrl}) 中的错误信息`,
+              `2. 确认 \`TUSHARE_TOKEN\` / \`SERVERCHAN_KEY\` 等 Secrets 是否有效`,
+              `3. 确认数据源（akshare/tushare/mootdx）是否可用`,
+              `4. 如为网络问题，可手动触发 [workflow_dispatch](${runUrl}) 重试`,
+              ``,
+              `此 Issue 由 GitHub Actions 自动创建，推送成功后将自动关闭。`
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `⚠️ **再次失败** - ${new Date().toISOString()}\n\n${body}`
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `[推送失败] ${date} ${slotCn}推送`,
+                body: body,
+                labels: ['push-failure', 'auto-alert']
+              });
+            }
+
+  # ── 推送成功后关闭历史告警 Issue ──
+  close-alerts-on-success:
+    name: Close stale alerts on success
+    needs: [check-duplicate, daily-push]
+    if: success() && needs.check-duplicate.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['push-failure', 'auto-alert'],
+              per_page: 20
+            });
+            for (const issue of issues.data) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `✅ 推送已恢复正常，自动关闭告警。`
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              });
+            }
