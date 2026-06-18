@@ -1,0 +1,26 @@
+name: Keepalive
+
+# 防止GitHub Actions因60天不活动自动禁用scheduled workflows
+# 每周一自动创建一个空commit保持repo活跃
+on:
+  schedule:
+    # 每周一 03:00 UTC = 北京时间11:00
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create keepalive commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 如果没有变更，创建一个空commit
+          git commit --allow-empty -m "chore: keepalive - prevent scheduled workflow disable"
+          git push

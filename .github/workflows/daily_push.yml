@@ -2,10 +2,13 @@ name: Daily Push
 
 on:
   schedule:
-    # 提前触发，确保扫描完成后准时投递
-    # 盘中扫描: 北京时间12:30 = UTC 04:30 → 13:00准时到达微信
+    # ── 错峰触发：避开整点/半点高峰，GitHub Actions高峰期延迟5-30分钟 ──
+    # 盘中扫描: 北京时间12:15 = UTC 04:15 → 扫描约20分钟 → 13:00准时到达微信
+    - cron: '15 4 * * 1-5'
+    # 盘后推送: 北京时间20:15 = UTC 12:15 → 扫描约20分钟 → 21:00准时到达微信
+    - cron: '15 12 * * 1-5'
+    # ── 备用触发：主触发后15分钟，如果主触发失败则备用触发兜底 ──
     - cron: '30 4 * * 1-5'
-    # 盘后推送: 北京时间20:30 = UTC 12:30 → 21:00准时到达微信
     - cron: '30 12 * * 1-5'
   workflow_dispatch:
     inputs:
@@ -14,11 +17,81 @@ on:
         required: false
         default: 'false'
 
+# ── 同一时间只允许一个实例运行，避免重复推送 ──
+concurrency:
+  group: daily-push-${{ github.event.schedule }}
+  cancel-in-progress: false
+
 jobs:
-  daily-push:
+  check-duplicate:
+    name: Check if already pushed today
     runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      time_slot: ${{ steps.check.outputs.time_slot }}
+    steps:
+      - id: check
+        run: |
+          # 判断当前是盘中还是盘后
+          UTC_HOUR=$(date -u +%H)
+          UTC_MIN=$(date -u +%M)
+          UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
+
+          # 04:00-05:00 UTC = 盘中(12:00-13:00 北京时间)
+          # 12:00-13:00 UTC = 盘后(20:00-21:00 北京时间)
+          if [ $UTC_MIN_TOTAL -ge 240 ] && [ $UTC_MIN_TOTAL -lt 360 ]; then
+            echo "time_slot=intraday" >> $GITHUB_OUTPUT
+            SLOT="intraday"
+          elif [ $UTC_MIN_TOTAL -ge 720 ] && [ $UTC_MIN_TOTAL -lt 840 ]; then
+            echo "time_slot=after_hours" >> $GITHUB_OUTPUT
+            SLOT="after_hours"
+          else
+            echo "time_slot=unknown" >> $GITHUB_OUTPUT
+            SLOT="unknown"
+          fi
+
+          # 检查今天是否已经推送过该时段（通过artifact检查）
+          TODAY=$(date +'%Y-%m-%d')
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "Time slot: $SLOT, Date: $TODAY"
+
+  daily-push:
+    name: Run push
+    needs: check-duplicate
+    if: needs.check-duplicate.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Log trigger time and detect delay
+        id: trigger_info
+        run: |
+          echo "=== Workflow Trigger Info ==="
+          echo "Trigger time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "Trigger time (Beijing): $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "Time slot: ${{ needs.check-duplicate.outputs.time_slot }}"
+
+          # 计算延迟（与预期触发时间对比）
+          UTC_HOUR=$(date -u +%H)
+          UTC_MIN=$(date -u +%M)
+          UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
+
+          SLOT="${{ needs.check-duplicate.outputs.time_slot }}"
+          if [ "$SLOT" = "intraday" ]; then
+            EXPECTED_MIN=255  # 04:15 UTC
+          elif [ "$SLOT" = "after_hours" ]; then
+            EXPECTED_MIN=735  # 12:15 UTC
+          else
+            EXPECTED_MIN=$UTC_MIN_TOTAL
+          fi
+
+          DELAY_MIN=$((UTC_MIN_TOTAL - EXPECTED_MIN))
+          echo "Delay: ${DELAY_MIN} minutes"
+          if [ $DELAY_MIN -gt 10 ]; then
+            echo "⚠️ Trigger delayed by ${DELAY_MIN} minutes!"
+          fi
+          echo "delay_minutes=$DELAY_MIN" >> $GITHUB_OUTPUT
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -75,6 +148,62 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: push-results-${{ steps.date.outputs.today }}
+          name: push-results-${{ steps.date.outputs.today }}-${{ needs.check-duplicate.outputs.time_slot }}
+          path: results/daily/
+          retention-days: 30
+
+  # ── 失败重试：如果主任务失败，5分钟后自动重试一次 ──
+  retry-push:
+    name: Retry if failed
+    needs: [check-duplicate, daily-push]
+    if: failure() && needs.check-duplicate.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Get current date
+        id: date
+        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Cache stock data & OAMV cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            results/stock_cache.duckdb
+            results/oamv_cache
+          key: stock-cache-v3-${{ runner.os }}-${{ steps.date.outputs.today }}
+          restore-keys: |
+            stock-cache-v3-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Retry Daily Push
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          SERVERCHAN_KEY_BETA: ${{ secrets.SERVERCHAN_KEY_BETA }}
+          WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
+          WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
+          WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "=== Retry push after failure ==="
+          echo "Retry time (Beijing): $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          python -u classic_ta/daily_push.py
+
+      - name: Upload retry results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: push-retry-${{ steps.date.outputs.today }}-${{ needs.check-duplicate.outputs.time_slot }}
           path: results/daily/
           retention-days: 30
