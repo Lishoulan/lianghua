@@ -359,26 +359,61 @@ def daily_push():
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     print(f"  结果已保存: {result_file}", flush=True)
 
-    # 分组推送（定时投递，确保准时到达微信）
-    print("\n分组推送微信...", flush=True)
+    # ══════════════════════════════════════════════════════════
+    #  Server酱推送（定时投递，确保准时到达微信）
+    # ══════════════════════════════════════════════════════════
+    print("\n" + "=" * 60, flush=True)
+    print("📤 Server酱推送", flush=True)
+    print("=" * 60, flush=True)
+
     scheduled_time = _calc_scheduled_time(is_intraday)
     if scheduled_time:
-        print(f"  定时投递: {scheduled_time}（北京时间）", flush=True)
-    push_results = send_group_push(admin_title, admin_desp, beta_title, beta_desp, scheduled=scheduled_time)
-    print(f"推送完成: 管理员组={'成功' if push_results.get('admin') else '跳过/失败'} | "
-          f"内测组={'成功' if push_results.get('beta') else '跳过/失败'}", flush=True)
+        print(f"  📅 定时投递目标: {scheduled_time}（北京时间）", flush=True)
+        print(f"  💡 扫描完成时间: {datetime.now(_BJT).strftime('%H:%M:%S')}，消息将在目标时间准时投递到微信", flush=True)
+    else:
+        print(f"  ⚡ 立即发送（已过目标投递时间）", flush=True)
 
-    # 公众号群发（仅盘后模式）
+    push_results = {"admin": False, "beta": False}
+    try:
+        push_results = send_group_push(admin_title, admin_desp, beta_title, beta_desp, scheduled=scheduled_time)
+    except Exception as e:
+        print(f"  ❌ 推送异常（非致命，继续后续流程）: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+    # 推送结果校验
+    admin_ok = push_results.get("admin", False)
+    beta_ok = push_results.get("beta", False)
+    print(f"\n📊 推送结果: 管理员组={'✅成功' if admin_ok else '❌失败'} | 内测组={'✅成功' if beta_ok else '❌失败'}", flush=True)
+
+    if not admin_ok and not beta_ok:
+        print("⚠️ 所有推送通道均失败！请检查 SERVERCHAN_KEY 配置和网络连接", flush=True)
+        print("  提示: GitHub Actions 的 retry-push job 将自动重试", flush=True)
+
+    # ══════════════════════════════════════════════════════════
+    #  公众号群发（仅盘后模式）
+    # ══════════════════════════════════════════════════════════
     if not is_intraday:
-        print("\n公众号群发...", flush=True)
+        print("\n" + "=" * 60, flush=True)
+        print("📢 公众号群发（盘后）", flush=True)
+        print("=" * 60, flush=True)
         try:
             from wechat_push import push_signals_to_wechat
             wechat_result = push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=False)
-            print(f"公众号群发: {'成功' if wechat_result.get('success') else '失败'}", flush=True)
+            wechat_ok = wechat_result.get("success", False)
+            skipped = wechat_result.get("skipped", False)
+            if skipped:
+                print(f"  ⏭️ 公众号群发: 已跳过（今日已成功群发，幂等保护生效）", flush=True)
+            elif wechat_ok:
+                print(f"  ✅ 公众号群发: 成功", flush=True)
+            else:
+                print(f"  ❌ 公众号群发: 失败 - {wechat_result.get('error', '未知')}", flush=True)
         except Exception as e:
-            print(f"公众号群发异常: {e}", flush=True)
+            print(f"  ❌ 公众号群发异常（非致命）: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
     else:
-        print("\n盘中模式，跳过公众号群发（仅盘后群发）", flush=True)
+        print("\n📢 盘中模式，跳过公众号群发（仅盘后群发）", flush=True)
 
     # 摘要
     print(f"\n{'='*80}")

@@ -127,6 +127,8 @@ jobs:
         run: pip install --default-timeout=60 --retries=3 -r requirements.txt
 
       - name: Pre-warm data cache
+        continue-on-error: true
+        timeout-minutes: 2
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
         run: |
@@ -138,6 +140,7 @@ jobs:
           "
 
       - name: Run Daily Push
+        timeout-minutes: 25
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
@@ -147,6 +150,7 @@ jobs:
           WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PYTHONUNBUFFERED: '1'
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             python classic_ta/daily_push.py --dry-run
@@ -198,6 +202,7 @@ jobs:
         run: pip install --default-timeout=60 --retries=3 -r requirements.txt
 
       - name: Retry Daily Push
+        timeout-minutes: 20
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
@@ -207,6 +212,7 @@ jobs:
           WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PYTHONUNBUFFERED: '1'
         run: |
           echo "=== Retry push after failure ==="
           echo "Retry time (Beijing): $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
