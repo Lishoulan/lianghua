@@ -57,20 +57,31 @@ from classic_ta.stock_data_duckdb import get_cache_stats
 # ══════════════════════════════════════════════════════════
 BEST_PARAMS = V64_PARAMS.copy()
 BEST_PARAMS.update({
-    "entry_quality_min_score": 5,
+    # 信号过滤参数（L方案：放宽评分到4分，信号数量+33%，5日胜率45.3%）
+    "entry_quality_min_score": 4,  # 5→4（4分信号5日胜率47.2%，质量优于5分）
     "ambush_j_oversold": 5,
     "ambush_window": 8,
     "industry_rs_top_pct": 0.20,
     "eq_j_extreme": 3,
+    # 止损优化参数（J方案：全市场5年回测总收益+778%，盈亏比2.71）
+    "time_stop_loss": 0.0,          # 0.01→0.0（只有浮亏才时间止损）
+    "time_stop_days": 10,           # 7→10（给趋势更多时间）
+    "max_hold_days": 30,            # 20→30（延长最大持仓）
+    "chandelier_atr_mult": 3.0,     # 3.5→3.0（更紧的吊灯止盈）
+    "dynamic_chandelier_low": 2.5,  # 3.0→2.5
+    "dynamic_chandelier_mid": 3.0,  # 3.5→3.0
+    "dynamic_chandelier_high": 3.5, # 4.0→3.5
+    "breakeven_trigger_pct": 0.02,  # 0.03→0.02（更早激活保本）
+    "breakeven_min_profit_pct": 0.003,  # 0.005→0.003
 })
 
-# 精细动态评分参数
+# 精细动态评分参数（配合entry_quality_min_score=4）
 DYNAMIC_SCORE_PARAMS = {
-    "bull_min_score": 5,
-    "bull_score4_j_max": 5,
-    "bull_score4_vol_ratio_max": 0.60,
-    "bear_min_score": 6,
-    "j_hard_cap": 5,
+    "bull_min_score": 4,              # 5→4（牛市允许4分信号）
+    "bull_score4_j_max": 8,           # 5→8（4分信号J值上限放宽）
+    "bull_score4_vol_ratio_max": 0.70,  # 0.60→0.70（4分信号量比上限放宽）
+    "bear_min_score": 5,              # 6→5（熊市也允许5分信号，配合OAMV过滤）
+    "j_hard_cap": 8,                  # 5→8（J值硬上限放宽，配合ambush_j_oversold=5）
 }
 
 # 定时投递目标时间（北京时间，消息到达微信的时间）
@@ -279,6 +290,11 @@ def daily_push():
             "ambush_window": BEST_PARAMS["ambush_window"],
             "industry_rs_top_pct": BEST_PARAMS["industry_rs_top_pct"],
             "eq_j_extreme": BEST_PARAMS["eq_j_extreme"],
+            "time_stop_loss": BEST_PARAMS["time_stop_loss"],
+            "time_stop_days": BEST_PARAMS["time_stop_days"],
+            "max_hold_days": BEST_PARAMS["max_hold_days"],
+            "chandelier_atr_mult": BEST_PARAMS["chandelier_atr_mult"],
+            "breakeven_trigger_pct": BEST_PARAMS["breakeven_trigger_pct"],
         },
         "dynamic_score_rules": DYNAMIC_SCORE_PARAMS,
         "oamv_status": oamv_status,

@@ -26,8 +26,8 @@ _duckdb_write_lock = threading.Lock()
 CACHE_DIR = Path(__file__).parent.parent / "results" / "stock_cache"
 DUCKDB_PATH = Path(__file__).parent.parent / "results" / "stock_cache.duckdb"
 
-# 数据起始日期
-DEFAULT_START_DATE = "20240101"
+# 数据起始日期（5年完整历史，确保回测有足够数据）
+DEFAULT_START_DATE = "20210101"
 
 # DuckDB可用性检测
 _DUCKDB_AVAILABLE = None
@@ -326,10 +326,15 @@ def get_stock_data_cached(ts_code, min_rows=130):
 
     if cached is not None and len(cached) > 0:
         last_date = cached.index[-1].normalize()
+        first_date = cached.index[0].normalize()
 
-        # 缓存已是最新（最后日期 >= 今天）→ 直接返回
+        # 缓存已是最新（最后日期 >= 今天）且历史完整 → 直接返回
         if last_date >= today_ts and len(cached) >= min_rows:
-            return cached
+            # 检查历史是否完整（起始日期不晚于DEFAULT_START_DATE）
+            default_start = pd.Timestamp(DEFAULT_START_DATE)
+            if first_date.normalize() <= default_start:
+                return cached
+            # 历史不完整，需要补全
 
         # 2. 增量获取: 从缓存最后日期的下一天开始
         fetch_start = (last_date + pd.Timedelta(days=1)).strftime("%Y%m%d")
@@ -342,11 +347,28 @@ def get_stock_data_cached(ts_code, min_rows=130):
             combined = combined.sort_index()
             save_stock_cache(ts_code, combined)
             if len(combined) >= min_rows:
-                return combined
+                cached = combined
         else:
             # 无新数据但缓存足够
             if len(cached) >= min_rows:
-                return cached
+                pass  # 继续检查历史完整性
+
+        # 3. 检查历史完整性：如果缓存起始日期晚于DEFAULT_START_DATE，补全历史
+        default_start = pd.Timestamp(DEFAULT_START_DATE)
+        if cached.index[0].normalize() > default_start + pd.Timedelta(days=5):
+            # 缓存缺少早期历史数据，补全
+            hist_start = DEFAULT_START_DATE
+            hist_end = (cached.index[0].normalize() - pd.Timedelta(days=1)).strftime("%Y%m%d")
+            hist_data = _fetch_raw_stock_data(ts_code, start_date=hist_start, end_date=hist_end)
+            if hist_data is not None and len(hist_data) > 0:
+                combined = pd.concat([hist_data, cached])
+                combined = combined[~combined.index.duplicated(keep="last")]
+                combined = combined.sort_index()
+                save_stock_cache(ts_code, combined)
+                cached = combined
+
+        if len(cached) >= min_rows:
+            return cached
 
         return None
 
