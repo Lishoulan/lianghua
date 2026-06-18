@@ -1,0 +1,99 @@
+# ══════════════════════════════════════════════════════════
+# 量化潜伏系统 — docker-compose.yml
+# 一键启动：扫描服务 + 定时任务 + 数据持久化
+# ══════════════════════════════════════════════════════════
+#
+# 用法：
+#   1. 复制 .env.example 为 .env 并填入 API Keys
+#   2. docker-compose up -d
+#
+# 服务说明：
+#   - scanner:    执行每日扫描推送（cron 内置）
+#   - cloud-func: 微信回调 + 推送网关（HTTP 服务）
+#   - 数据卷:     DuckDB 缓存 + 推送结果持久化
+# ══════════════════════════════════════════════════════════
+
+version: "3.9"
+
+services:
+  # ── 扫描推送服务（定时执行）──
+  scanner:
+    build: .
+    container_name: tradingagents-scanner
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - RUN_MODE=cron
+    volumes:
+      - stock-cache:/app/results
+      - ./logs:/app/logs
+    # 使用内置 cron 调度（北京时间）
+    # 盘中 14:15 + 盘后 18:15（Server酱定时投递确保准时到达）
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "30 13 * * 1-5 cd /app && python -u classic_ta/daily_push.py >> /app/logs/intraday.log 2>&1" > /etc/crontabs/root
+        echo "30 17 * * 1-5 cd /app && python -u classic_ta/daily_push.py >> /app/logs/after_hours.log 2>&1" >> /etc/crontabs/root
+        echo "0 3 * * 1  cd /app && python -c 'print(\"keepalive\")' >> /app/logs/keepalive.log 2>&1" >> /etc/crontabs/root
+        crond -f -l 2
+
+  # ── 微信回调 + 推送网关（HTTP 服务）──
+  # 需要额外安装 Flask/gunicorn，或部署到腾讯云函数
+  cloud-func:
+    build: .
+    container_name: tradingagents-cloud-func
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Asia/Shanghai
+      - RUN_MODE=server
+    ports:
+      - "8080:8080"
+    volumes:
+      - stock-cache:/app/results
+      - ./logs:/app/logs
+    # 简易 HTTP 服务（生产环境建议用 gunicorn + Flask）
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        pip install flask gunicorn --quiet
+        python -c "
+        from flask import Flask, request, jsonify
+        import sys, os
+        sys.path.insert(0, '/app')
+        from wechat_push.cloud_function import wechat_handler, push_handler, health_handler, stats_handler
+        app = Flask(__name__)
+
+        @app.route('/wechat', methods=['GET', 'POST'])
+        def wechat():
+            event = {'queryString': dict(request.args)}
+            if request.method == 'POST':
+                event['body'] = request.get_data(as_text=True)
+                event['headers'] = dict(request.headers)
+            result = wechat_handler(event, None)
+            return result['body'], result['statusCode']
+
+        @app.route('/push', methods=['POST'])
+        def push():
+            event = {'body': request.get_data(as_text=True), 'headers': dict(request.headers)}
+            result = push_handler(event, None)
+            return result['body'], result['statusCode']
+
+        @app.route('/health', methods=['GET'])
+        def health():
+            result = health_handler({}, None)
+            return result['body'], result['statusCode']
+
+        @app.route('/stats', methods=['GET'])
+        def stats():
+            event = {'queryString': dict(request.args), 'headers': dict(request.headers)}
+            result = stats_handler(event, None)
+            return result['body'], result['statusCode']
+
+        app.run(host='0.0.0.0', port=8080)
+        "
+
+volumes:
+  stock-cache:
+    driver: local

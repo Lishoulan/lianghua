@@ -1,0 +1,61 @@
+# Docker 部署忽略文件
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# Git
+.git
+.gitignore
+.github
+
+# IDE
+.trae
+.qoder
+.vscode
+.idea
+
+# Python 缓存
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# 虚拟环境与依赖
+.venv
+tradingagents_env
+pip_libs
+
+# 运行时数据（通过 volume 持久化，不打包到镜像）
+results/
+logs/
+*.log
+*.duckdb
+*.duckdb.wal
+
+# 回测脚本（开发用）
+analyze_*.py
+backtest_*.py
+check_*.py
+compare_*.py
+cross_model_compare.py
+dynamic_score_backtest.py
+fine_dynamic_backtest.py
+full_backtest_v64.py
+oamv_threshold_optimizer.py
+param_sensitivity.py
+run_all_models_backtest.py
+score_filter_compare.py
+v64_live_backtest.py
+v64_optimized_backtest.py
+
+# 系统
+.DS_Store
+Thumbs.db

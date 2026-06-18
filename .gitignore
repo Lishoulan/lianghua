@@ -1,28 +1,76 @@
-.env
-.trae/
-.qoder/
+# ── Python ──
 __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+*.egg
 dist/
 build/
 .venv/
 tradingagents_env/
 pip_libs/
+
+# ── 环境变量（不提交） ──
+.env
+.env.local
+.env.*.local
+
+# ── IDE ──
+.trae/
+.qoder/
+.vscode/
+.idea/
+
+# ── 数据缓存（不提交） ──
+results/
+logs/
 portfolio_state/
 paper_trade_results/
 double_line_backtest_results/
+backtest_results/
+daily_scan_results/
+catboost_info/
+
+# ── 运行时文件 ──
 auto_positions.json
 auto_trade_log.json
 auto_trade.log
 *.log
-.DS_Store
-Thumbs.db
-backtest_results/
-catboost_info/
-daily_scan_results/
-results/
 *.cbm
 events.out.tfevents
 *.tsv
+
+# ── Docker 运行时（不提交） ──
+*.duckdb
+*.duckdb.wal
+
+# ── 损坏备份文件（不提交） ──
+*.corrupt.bak
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db
+
+# ── 临时回测脚本（开发用，不提交） ──
+analyze_*.py
+backtest_*.py
+check_*.py
+compare_*.py
+cross_model_compare.py
+dynamic_score_backtest.py
+fine_dynamic_backtest.py
+full_backtest_v64.py
+oamv_threshold_optimizer.py
+param_sensitivity.py
+run_all_models_backtest.py
+score_filter_compare.py
+v64_live_backtest.py
+v64_optimized_backtest.py
+
+# ── 工具缓存 ──
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/

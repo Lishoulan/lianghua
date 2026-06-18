@@ -1,4 +1,4 @@
-# TradingAgents Code Wiki
+# lianghua Code Wiki
 
 > A股潜伏策略量化交易系统 —— 基于威科夫+VPA理论的情绪冰点潜伏框架
 
@@ -25,7 +25,7 @@
 
 ## 1. 项目概述
 
-TradingAgents 是一个面向A股市场的量化交易系统，核心策略为 **"潜伏模型"（Ambush Model）**，基于威科夫（Wyckoff）理论与VPA（量价分析）方法，通过识别"需求大阳线（SOS）"后的"情绪冰点"来低吸买入，而非追涨。
+lianghua 是一个面向A股市场的量化交易系统，核心策略为 **"潜伏模型"（Ambush Model）**，基于威科夫（Wyckoff）理论与VPA（量价分析）方法，通过识别"需求大阳线（SOS）"后的"情绪冰点"来低吸买入，而非追涨。
 
 **核心策略流程：**
 
@@ -95,7 +95,7 @@ SOS锚定（确认主力入场）→ 等待情绪冰点（J值超卖+缩量+小�
 ## 3. 目录结构
 
 ```
-TradingAgents/
+lianghua/
 ├── classic_ta/                    # 核心策略包：经典技术分析
 │   ├── __init__.py
 │   ├── v60_ambush_model.py        # V6.0 基础潜伏模型

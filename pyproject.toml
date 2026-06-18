@@ -1,0 +1,129 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradingagents"
+version = "6.4.0"
+description = "A股量化潜伏信号系统 — 威科夫量价理论 + VPA量价分析"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Lishoulan" },
+]
+keywords = [
+    "quantitative-trading",
+    "a-share",
+    "wyckoff",
+    "vpa",
+    "volume-price-analysis",
+    "signal-detection",
+    "wechat-push",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    "tushare>=1.2.89",
+    "akshare>=1.12.0",
+    "mootdx>=0.5.8",
+    "pandas>=1.5.0",
+    "numpy>=1.23.0",
+    "requests>=2.28.0",
+    "python-dotenv>=1.0.0",
+    "duckdb>=0.9.0",
+    "tenacity>=8.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+wechat = [
+    "supabase>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Lishoulan/lianghua"
+Repository = "https://github.com/Lishoulan/lianghua"
+Issues = "https://github.com/Lishoulan/lianghua/issues"
+Changelog = "https://github.com/Lishoulan/lianghua/blob/main/CHANGELOG.md"
+
+[project.scripts]
+tradingagents-push = "trigger_push:main"
+
+[tool.setuptools.packages.find]
+include = ["classic_ta*", "ml_strategy*", "wechat_push*"]
+exclude = ["tests*", "pip_libs*", "tradingagents_env*"]
+
+# ── Ruff 代码风格 ──
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    "pip_libs",
+    "tradingagents_env",
+    ".venv",
+    "results",
+    "backtest_results",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long（项目中文注释多）
+    "B008",  # 函数默认值调用（如 load_dotenv）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # 测试中允许 assert False
+
+# ── pytest ──
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--showlocals",
+]
+markers = [
+    "slow: 标记慢测试（全市场扫描等）",
+    "integration: 需要外部服务的集成测试",
+]
+
+# ── mypy 类型检查 ──
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+exclude = [
+    "pip_libs/",
+    "tradingagents_env/",
+    "tests/",
+]
