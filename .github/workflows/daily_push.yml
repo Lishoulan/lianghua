@@ -2,14 +2,14 @@ name: Daily Push
 
 on:
   schedule:
-    # ── 错峰触发：避开整点/半点高峰，GitHub Actions高峰期延迟5-30分钟 ──
-    # 盘中扫描: 北京时间13:30 = UTC 05:30 → 扫描约20分钟 → 13:50完成 → Server酱定时投递14:15到达微信
-    - cron: '30 5 * * 1-5'
-    # 盘后推送: 北京时间17:30 = UTC 09:30 → 扫描约20分钟 → 17:50完成 → Server酱定时投递18:15到达微信
-    - cron: '30 9 * * 1-5'
-    # ── 备用触发：主触发后15分钟，如果主触发失败则备用触发兜底 ──
-    - cron: '45 5 * * 1-5'
-    - cron: '45 9 * * 1-5'
+    # ── 盘中梯度触发 ──
+    - cron: '15 5 * * 1-5'   # 北京13:15 提前触发
+    - cron: '30 5 * * 1-5'   # 北京13:30 主触发
+    - cron: '50 5 * * 1-5'   # 北京13:50 兜底触发
+    # ── 盘后梯度触发 ──
+    - cron: '15 9 * * 1-5'   # 北京17:15 提前触发
+    - cron: '30 9 * * 1-5'   # 北京17:30 主触发
+    - cron: '50 9 * * 1-5'   # 北京17:50 兜底触发
   workflow_dispatch:
     inputs:
       dry_run:
@@ -17,9 +17,9 @@ on:
         required: false
         default: 'false'
 
-# ── 同一时间只允许一个实例运行，避免重复推送 ──
+# ── 同一时间只允许一个实例运行，防重复逻辑由 check-duplicate job 负责 ──
 concurrency:
-  group: daily-push-${{ github.event.schedule }}
+  group: daily-push
   cancel-in-progress: false
 
 jobs:
@@ -31,36 +31,44 @@ jobs:
       time_slot: ${{ steps.check.outputs.time_slot }}
     steps:
       - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # 判断当前是盘中还是盘后
+          # 判断时段
           UTC_HOUR=$(date -u +%H)
           UTC_MIN=$(date -u +%M)
           UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
 
-          # 04:00-05:00 UTC = 盘中(12:00-13:00 北京时间)
-          # 12:00-13:00 UTC = 盘后(20:00-21:00 北京时间)
-          if [ $UTC_MIN_TOTAL -ge 240 ] && [ $UTC_MIN_TOTAL -lt 360 ]; then
-            echo "time_slot=intraday" >> $GITHUB_OUTPUT
+          if [ $UTC_MIN_TOTAL -ge 240 ] && [ $UTC_MIN_TOTAL -lt 420 ]; then
             SLOT="intraday"
-          elif [ $UTC_MIN_TOTAL -ge 720 ] && [ $UTC_MIN_TOTAL -lt 840 ]; then
-            echo "time_slot=after_hours" >> $GITHUB_OUTPUT
+          elif [ $UTC_MIN_TOTAL -ge 480 ] && [ $UTC_MIN_TOTAL -lt 660 ]; then
             SLOT="after_hours"
           else
-            echo "time_slot=unknown" >> $GITHUB_OUTPUT
             SLOT="unknown"
           fi
+          echo "time_slot=$SLOT" >> $GITHUB_OUTPUT
 
-          # 检查今天是否已经推送过该时段（通过artifact检查）
+          # 幂等锁：检查今天同时段是否已有成功的 push artifact
           TODAY=$(date +'%Y-%m-%d')
-          echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "Time slot: $SLOT, Date: $TODAY"
+          ARTIFACT_NAME="push-results-${TODAY}-${SLOT}"
+
+          # 使用 GitHub API 查询 artifacts
+          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/artifacts --jq ".artifacts[] | select(.name == \"${ARTIFACT_NAME}\") | .id" 2>/dev/null || echo "")
+
+          if [ -n "$ARTIFACTS" ]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "⏭️ 今日${SLOT}时段已成功推送，跳过"
+          else
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "✅ 今日${SLOT}时段未推送，继续执行"
+          fi
 
   daily-push:
     name: Run push
     needs: check-duplicate
     if: needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -79,9 +87,9 @@ jobs:
 
           SLOT="${{ needs.check-duplicate.outputs.time_slot }}"
           if [ "$SLOT" = "intraday" ]; then
-            EXPECTED_MIN=255  # 04:15 UTC
+            EXPECTED_MIN=315  # 05:15 UTC
           elif [ "$SLOT" = "after_hours" ]; then
-            EXPECTED_MIN=735  # 12:15 UTC
+            EXPECTED_MIN=555  # 09:15 UTC
           else
             EXPECTED_MIN=$UTC_MIN_TOTAL
           fi
@@ -109,12 +117,14 @@ jobs:
           path: |
             results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v3-${{ runner.os }}-${{ steps.date.outputs.today }}
+          key: stock-cache-v4-${{ runner.os }}
           restore-keys: |
+            stock-cache-v4-${{ runner.os }}-
             stock-cache-v3-${{ runner.os }}-
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        timeout-minutes: 5
+        run: pip install --default-timeout=60 --retries=3 -r requirements.txt
 
       - name: Pre-warm data cache
         env:
@@ -178,12 +188,14 @@ jobs:
           path: |
             results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v3-${{ runner.os }}-${{ steps.date.outputs.today }}
+          key: stock-cache-v4-${{ runner.os }}
           restore-keys: |
+            stock-cache-v4-${{ runner.os }}-
             stock-cache-v3-${{ runner.os }}-
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        timeout-minutes: 5
+        run: pip install --default-timeout=60 --retries=3 -r requirements.txt
 
       - name: Retry Daily Push
         env:
@@ -201,10 +213,10 @@ jobs:
           python -u classic_ta/daily_push.py
 
       - name: Upload retry results
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: push-retry-${{ steps.date.outputs.today }}-${{ needs.check-duplicate.outputs.time_slot }}
+          name: push-results-${{ steps.date.outputs.today }}-${{ needs.check-duplicate.outputs.time_slot }}
           path: results/daily/
           retention-days: 30
 

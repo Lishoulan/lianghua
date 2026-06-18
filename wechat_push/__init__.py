@@ -84,6 +84,80 @@ def _supabase_headers():
     }
 
 
+def _check_push_idempotency(mode: str) -> bool:
+    """检查今天该模式是否已成功群发（幂等锁）
+
+    通过 Supabase push_logs 表查询今日该模式是否已有成功记录。
+    用于防止 GitHub Actions 备用触发/重试导致重复群发。
+
+    Args:
+        mode: "intraday" 或 "after_hours"
+
+    Returns:
+        True = 已发送（应跳过），False = 未发送（可继续）
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False  # Supabase未配置，不做幂等检查
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/push_logs"
+        params = {
+            "select": "id",
+            "push_date": f"eq.{today}",
+            "mode": f"eq.{mode}",
+            "wechat_success": "gt.0",
+            "limit": "1",
+        }
+        resp = requests.get(url, headers=_supabase_headers(), params=params, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and len(data) > 0:
+                return True  # 今日已成功推送
+        return False
+    except Exception as e:
+        print(f"  幂等检查异常（非致命，继续推送）: {e}")
+        return False  # 异常时不阻止推送
+
+
+def _record_push_success(mode: str, result: dict):
+    """记录群发成功到 push_logs（含唯一性约束保护）
+
+    写入记录后，后续的幂等检查会发现已有成功记录从而跳过。
+
+    Args:
+        mode: "intraday" 或 "after_hours"
+        result: 群发结果 dict
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/push_logs"
+        data = {
+            "push_date": today,
+            "mode": mode,
+            "wechat_success": 1,
+            "wechat_mass_id": result.get("msg_id", ""),
+            "push_time": datetime.utcnow().isoformat(),
+        }
+        headers = _supabase_headers()
+        # 使用 upsert 模式，配合唯一性约束(push_date, mode)防止重复
+        headers["Prefer"] = "resolution=ignore-duplicates,return=representation"
+        resp = requests.post(url, headers=headers, json=data, timeout=5)
+        if resp.status_code in (200, 201):
+            print(f"  推送记录已写入 push_logs ({today}/{mode})")
+        elif resp.status_code == 409:
+            print(f"  推送记录已存在（幂等保护生效）")
+        else:
+            print(f"  推送记录写入异常: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"  推送记录写入失败（非致命）: {e}")
+
+
 def upsert_user(open_id, nickname=""):
     """新增或更新用户（关注时调用）"""
     if not SUPABASE_URL:
@@ -433,6 +507,12 @@ def push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=Fal
         return {"success": False, "error": "not_configured"}
 
     try:
+        # 0. 幂等检查：今天该时段已成功群发则跳过
+        mode = "intraday" if is_intraday else "after_hours"
+        if _check_push_idempotency(mode):
+            print(f"  ⏭️ 今日{mode}已成功群发，跳过重复发送")
+            return {"success": True, "skipped": True, "reason": "idempotent"}
+
         # 1. 生成标题
         today = datetime.now().strftime("%m月%d日")
         if oamv_status:
@@ -455,12 +535,17 @@ def push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=Fal
         print("  群发推文...", flush=True)
         result = mass_send_news(media_id)
 
-        return {
+        # 5. 记录群发成功（幂等锁写入）
+        push_result = {
             "success": True,
             "media_id": media_id,
             "msg_id": result.get("msg_id"),
             "msg_data_id": result.get("msg_data_id"),
         }
+        mode = "intraday" if is_intraday else "after_hours"
+        _record_push_success(mode, push_result)
+
+        return push_result
 
     except Exception as e:
         print(f"  公众号群发失败: {e}", flush=True)

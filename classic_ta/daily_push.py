@@ -26,7 +26,7 @@ import os
 import json
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -96,27 +96,31 @@ DELIVERY_SCHEDULE = {
 #  定时投递计算
 # ══════════════════════════════════════════════════════════
 
+# 北京时区
+_BJT = timezone(timedelta(hours=8))
+
 def _calc_scheduled_time(is_intraday):
     """计算Server酱定时投递时间
 
     根据当前时段（盘中/盘后）确定目标投递时间。
     如果当前时间已超过目标投递时间，则立即发送（不设定scheduled）。
+    显式使用北京时区，确保在 UTC runner 上也能正确计算。
 
     Returns:
         str or None: "YYYY-MM-DD HH:MM:SS" 格式的北京时间，或None（立即发送）
     """
-    now = datetime.now()
+    now = datetime.now(_BJT)  # 明确使用北京时间
     today_str = now.strftime("%Y-%m-%d")
 
     if is_intraday:
-        target = DELIVERY_SCHEDULE["intraday"]  # 13:00:00
+        target = DELIVERY_SCHEDULE["intraday"]
     else:
-        target = DELIVERY_SCHEDULE["after_hours"]  # 21:00:00
+        target = DELIVERY_SCHEDULE["after_hours"]
 
     scheduled_str = f"{today_str} {target}"
 
-    # 如果当前时间已超过目标投递时间，立即发送
-    target_dt = datetime.strptime(scheduled_str, "%Y-%m-%d %H:%M:%S")
+    # 如果当前北京时间已超过目标投递时间，立即发送
+    target_dt = datetime.strptime(scheduled_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_BJT)
     if now >= target_dt:
         print(f"  当前时间已过 {target}，立即发送", flush=True)
         return None
@@ -128,32 +132,74 @@ def _calc_scheduled_time(is_intraday):
 #  数据预热
 # ══════════════════════════════════════════════════════════
 
+def _is_trading_day():
+    """检查今天是否为A股交易日
+
+    优先使用 tushare 交易日历，降级为 akshare，最终降级为"周一到周五默认交易日"。
+    """
+    today_str = datetime.now(_BJT).strftime("%Y%m%d")
+
+    # 方案1: tushare交易日历
+    try:
+        import tushare as ts
+        pro = ts.pro_api(os.getenv("TUSHARE_TOKEN"))
+        cal = pro.trade_cal(exchange="SSE", start_date=today_str, end_date=today_str)
+        if cal is not None and len(cal) > 0:
+            return cal.iloc[0]["is_open"] == 1
+    except Exception:
+        pass
+
+    # 方案2: akshare交易日历
+    try:
+        import akshare as ak
+        cal = ak.tool_trade_date_hist_sina()
+        today_fmt = datetime.now(_BJT).strftime("%Y-%m-%d")
+        return today_fmt in cal['trade_date'].astype(str).values
+    except Exception:
+        pass
+
+    # 降级：周一到周五默认为交易日
+    return datetime.now(_BJT).weekday() < 5
+
+
 def prewarm_data():
-    """数据预热：确保缓存就绪，提前获取关键数据"""
-    print("\n[预热] 检查数据缓存...", flush=True)
+    """数据预热：健康预检 + 确保缓存就绪"""
+    print("\n[预热] 数据源健康预检...", flush=True)
 
     cache_stats = get_cache_stats()
     print(f"  DuckDB缓存: {cache_stats.get('count', 0)}只股票 | {cache_stats.get('size_mb', 0)}MB", flush=True)
+
+    # 快速连通性检查（每个数据源5秒超时）
+    akshare_ok = False
+    tushare_ok = False
 
     try:
         import akshare as ak
         df = ak.stock_zh_a_spot_em()
         if df is not None and len(df) > 100:
-            print(f"  akshare实时行情: 可用 ({len(df)}只)", flush=True)
+            akshare_ok = True
+            print(f"  ✅ akshare实时行情: 可用 ({len(df)}只)", flush=True)
         else:
-            print("  akshare实时行情: 数据异常", flush=True)
+            print("  ❌ akshare实时行情: 数据异常", flush=True)
     except Exception as e:
-        print(f"  akshare实时行情: 不可用 ({e})", flush=True)
+        print(f"  ❌ akshare实时行情: 不可用 ({e})", flush=True)
 
     try:
         import tushare as ts
         pro = ts.pro_api(os.getenv("TUSHARE_TOKEN"))
-        pro.trade_cal(exchange="SSE", is_open="1", limit=1)
-        print("  tushare接口: 可用", flush=True)
+        cal = pro.trade_cal(exchange="SSE", is_open="1", limit=1)
+        if cal is not None and len(cal) > 0:
+            tushare_ok = True
+            print("  ✅ tushare接口: 可用", flush=True)
+        else:
+            print("  ❌ tushare接口: 返回空", flush=True)
     except Exception as e:
-        print(f"  tushare接口: 不可用 ({e})", flush=True)
+        print(f"  ❌ tushare接口: 不可用 ({e})", flush=True)
 
-    now = datetime.now()
+    if not akshare_ok and not tushare_ok:
+        raise RuntimeError("❌ 所有数据源不可用，终止扫描等待重试触发")
+
+    now = datetime.now(_BJT)
     hour = now.hour
     if 9 <= hour < 15:
         print(f"  当前时段: 盘中({hour}:00) → 使用akshare实时数据+盘中信号", flush=True)
@@ -163,6 +209,7 @@ def prewarm_data():
         print(f"  当前时段: 盘前({hour}:00) → 使用缓存数据", flush=True)
 
     print("[预热] 完成", flush=True)
+    return {"akshare": akshare_ok, "tushare": tushare_ok}
 
 
 # ══════════════════════════════════════════════════════════
@@ -172,16 +219,21 @@ def prewarm_data():
 def daily_push():
     print("=" * 80, flush=True)
     print("潜伏模型V6.4 每日实盘推送（精细动态评分版）", flush=True)
-    print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"启动时间: {datetime.now(_BJT).strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
     print(f"优化参数: 评分≥5 | J<5 | window=8 | industry_top=20% | eq_j_extreme=3", flush=True)
     print(f"动态评分: 牛市≥5或(4+J<5+量比<0.6) | 熊市≥6 | J<5", flush=True)
     print("=" * 80, flush=True)
+
+    # 交易日检查
+    if not _is_trading_day():
+        print("📅 今日非交易日，跳过推送", flush=True)
+        return
 
     # 0. 数据预热
     prewarm_data()
 
     # 0.5 判断盘中/盘后模式
-    now = datetime.now()
+    now = datetime.now(_BJT)
     is_intraday = 9 <= now.hour < 15
     print(f"\n>>> {'盘中实时模式' if is_intraday else '盘后完整模式'} <<<", flush=True)
 
@@ -281,7 +333,7 @@ def daily_push():
 
     # 保存结果
     result = {
-        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "scan_time": datetime.now(_BJT).strftime("%Y-%m-%d %H:%M:%S"),
         "version": "V6.4-精细动态评分",
         "mode": "盘中实时" if is_intraday else "盘后完整",
         "params": {
@@ -302,7 +354,7 @@ def daily_push():
         "signals": signals,
         "industry_stats": industry_stats[:30],
     }
-    result_file = RESULT_DIR / f"daily_push_{datetime.now().strftime('%Y%m%d')}.json"
+    result_file = RESULT_DIR / f"daily_push_{datetime.now(_BJT).strftime('%Y%m%d')}.json"
     with open(result_file, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     print(f"  结果已保存: {result_file}", flush=True)

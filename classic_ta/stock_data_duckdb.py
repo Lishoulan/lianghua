@@ -11,6 +11,7 @@
 """
 
 import logging
+import queue
 import time
 import threading
 from pathlib import Path
@@ -67,6 +68,15 @@ def _get_duckdb_conn():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_code ON daily_data(ts_code)")
     except Exception:
         pass  # 索引可能已存在
+    return conn
+
+
+def _get_duckdb_read_conn():
+    """获取DuckDB只读连接（无需加锁，支持并行读）"""
+    import duckdb
+    if not DUCKDB_PATH.exists():
+        return None
+    conn = duckdb.connect(str(DUCKDB_PATH), read_only=True)
     return conn
 
 
@@ -141,16 +151,17 @@ def load_stock_cache(ts_code: str):
 
 
 def _load_from_duckdb(ts_code: str):
-    """从DuckDB加载单只股票数据"""
+    """从DuckDB加载单只股票数据（只读模式，无锁）"""
     try:
-        with _duckdb_write_lock:
-            conn = _get_duckdb_conn()
-            result = conn.execute(
-                "SELECT date, open, high, low, close, volume FROM daily_data "
-                "WHERE ts_code = ? ORDER BY date",
-                [ts_code]
-            ).fetchdf()
-            conn.close()
+        conn = _get_duckdb_read_conn()
+        if conn is None:
+            return _load_from_csv(ts_code)
+        result = conn.execute(
+            "SELECT date, open, high, low, close, volume FROM daily_data "
+            "WHERE ts_code = ? ORDER BY date",
+            [ts_code]
+        ).fetchdf()
+        conn.close()
 
         if result is None or len(result) < 10:
             return None
@@ -163,6 +174,49 @@ def _load_from_duckdb(ts_code: str):
     except Exception as e:
         logger.warning(f"DuckDB加载失败 {ts_code}: {e}")
         return _load_from_csv(ts_code)
+
+
+def _check_ex_rights_consistency(cached_last_close: float, new_data: pd.DataFrame, last_date) -> bool:
+    """除权除息一致性校验
+
+    通过overlap一天的数据，对比缓存最后一天的Close与增量数据同一天的Close，
+    如果偏差超过1%则判定为除权除息导致的数据不一致。
+
+    参数:
+        cached_last_close: 缓存最后一天的Close价格
+        new_data: 增量获取的数据（包含overlap天）
+        last_date: 缓存最后日期
+
+    返回:
+        True=一致, False=不一致（可能发生了除权除息）
+    """
+    if new_data is None or len(new_data) == 0:
+        return True
+
+    # 在new_data中找到与cached最后日期相同的那天
+    last_date_normalized = pd.Timestamp(last_date).normalize()
+    overlap_rows = new_data[new_data.index.normalize() == last_date_normalized]
+
+    if overlap_rows is None or len(overlap_rows) == 0:
+        # 没有overlap数据（可能停牌），无法校验，放行
+        return True
+
+    overlap_close = float(overlap_rows.iloc[-1]["Close"])
+
+    # 避免除零
+    if cached_last_close == 0:
+        return True
+
+    diff_ratio = abs(cached_last_close - overlap_close) / cached_last_close
+
+    if diff_ratio > 0.01:
+        logger.info(
+            f"除权校验不一致: cached_close={cached_last_close:.2f}, "
+            f"overlap_close={overlap_close:.2f}, diff={diff_ratio:.4f}"
+        )
+        return False
+
+    return True
 
 
 def _load_from_csv(ts_code: str):
@@ -220,6 +274,19 @@ def _save_to_csv(ts_code: str, df: pd.DataFrame):
     """保存到CSV（回退模式）"""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(CACHE_DIR / f"{ts_code}.csv")
+
+
+def delete_stock_cache(ts_code: str):
+    """删除单只股票的缓存数据（除权重建时使用）"""
+    if _is_duckdb_available():
+        with _duckdb_write_lock:
+            conn = _get_duckdb_conn()
+            conn.execute("DELETE FROM daily_data WHERE ts_code = ?", [ts_code])
+            conn.close()
+    # 同时清理CSV
+    csv_path = CACHE_DIR / f"{ts_code}.csv"
+    if csv_path.exists():
+        csv_path.unlink()
 
 
 def _fetch_raw_stock_data(ts_code, start_date=None, end_date=None):
@@ -308,8 +375,9 @@ def get_stock_data_cached(ts_code, min_rows=130):
     流程:
       1. 加载本地缓存（DuckDB优先，CSV回退）
       2. 如果缓存的最后日期已是今天 → 直接返回（零 API 调用）
-      3. 否则只获取 缓存最后日期+1 ~ 今天 的增量数据
-      4. 合并并保存
+      3. 否则获取 缓存最后日期 ~ 今天 的数据（重叠一天用于除权校验）
+      4. 除权校验：对比overlap日Close，偏差>1%则全量重建
+      5. 正常增量合并并保存
 
     参数:
         ts_code: 股票代码 (如 600519.SH)
@@ -336,18 +404,31 @@ def get_stock_data_cached(ts_code, min_rows=130):
                 return cached
             # 历史不完整，需要补全
 
-        # 2. 增量获取: 从缓存最后日期的下一天开始
-        fetch_start = (last_date + pd.Timedelta(days=1)).strftime("%Y%m%d")
-        new_data = _fetch_raw_stock_data(ts_code, start_date=fetch_start, end_date=end_date)
+        # 2. 增量获取: 从缓存最后日期开始（重叠一天，用于除权校验）
+        overlap_start = last_date.strftime("%Y%m%d")  # 从缓存最后日期开始（重叠一天）
+        new_data = _fetch_raw_stock_data(ts_code, start_date=overlap_start, end_date=end_date)
 
         if new_data is not None and len(new_data) > 0:
-            # 合并缓存 + 新数据（去重保留最新）
-            combined = pd.concat([cached, new_data])
-            combined = combined[~combined.index.duplicated(keep="last")]
-            combined = combined.sort_index()
-            save_stock_cache(ts_code, combined)
-            if len(combined) >= min_rows:
-                cached = combined
+            # 除权校验：对比overlap日的Close是否一致
+            cached_last_close = float(cached.iloc[-1]["Close"])
+            if not _check_ex_rights_consistency(cached_last_close, new_data, last_date):
+                logger.info(f"除权检测: {ts_code} 数据不一致，触发全量重建")
+                delete_stock_cache(ts_code)
+                full_df = _fetch_raw_stock_data(ts_code, DEFAULT_START_DATE, end_date)
+                if full_df is not None and len(full_df) >= min_rows:
+                    save_stock_cache(ts_code, full_df)
+                    return full_df
+                return None
+
+            # 正常增量合并（排除overlap日的重复数据）
+            new_only = new_data[new_data.index > last_date]
+            if len(new_only) > 0:
+                combined = pd.concat([cached, new_only])
+                combined = combined[~combined.index.duplicated(keep="last")]
+                combined = combined.sort_index()
+                save_stock_cache(ts_code, combined)
+                if len(combined) >= min_rows:
+                    cached = combined
         else:
             # 无新数据但缓存足够
             if len(cached) >= min_rows:
@@ -380,23 +461,65 @@ def get_stock_data_cached(ts_code, min_rows=130):
     return None
 
 
+def get_stock_data_readonly(ts_code, min_rows=130):
+    """纯只读获取股票数据（供多线程扫描使用）
+
+    不触发增量更新，不写入DuckDB。
+    如果缓存不存在或数据不足，返回 None。
+    """
+    cached = load_stock_cache(ts_code)
+    if cached is not None and len(cached) >= min_rows:
+        return cached
+    return None
+
+
+_pending_write_queue = queue.Queue()
+
+
+def batch_update_stocks(ts_codes: list):
+    """批量更新多只股票的缓存数据（单线程调用）
+
+    适用于扫描结束后一次性补全缓存缺失的数据。
+    """
+    if not ts_codes:
+        return {"updated": 0, "failed": 0}
+
+    logger.info(f"批量更新缓存: {len(ts_codes)}只股票")
+    updated = 0
+    failed = 0
+
+    for ts_code in ts_codes:
+        try:
+            df = get_stock_data_cached(ts_code, min_rows=1)
+            if df is not None:
+                updated += 1
+            else:
+                failed += 1
+        except Exception as e:
+            logger.warning(f"批量更新失败 {ts_code}: {e}")
+            failed += 1
+
+    logger.info(f"批量更新完成: 成功={updated} 失败={failed}")
+    return {"updated": updated, "failed": failed}
+
+
 def get_cache_stats():
     """获取缓存统计信息"""
     stats = {"mode": "unknown", "count": 0}
 
     if _is_duckdb_available() and DUCKDB_PATH.exists():
         try:
-            with _duckdb_write_lock:
-                conn = _get_duckdb_conn()
+            conn = _get_duckdb_read_conn()
+            if conn is not None:
                 count = conn.execute("SELECT COUNT(DISTINCT ts_code) FROM daily_data").fetchone()[0]
                 conn.close()
-            size_mb = round(DUCKDB_PATH.stat().st_size / 1024 / 1024, 1)
-            return {
-                "mode": "duckdb",
-                "count": count,
-                "dir": str(DUCKDB_PATH),
-                "size_mb": size_mb,
-            }
+                size_mb = round(DUCKDB_PATH.stat().st_size / 1024 / 1024, 1)
+                return {
+                    "mode": "duckdb",
+                    "count": count,
+                    "dir": str(DUCKDB_PATH),
+                    "size_mb": size_mb,
+                }
         except Exception as e:
             logger.warning(f"DuckDB统计失败: {e}")
 

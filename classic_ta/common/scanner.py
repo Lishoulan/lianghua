@@ -43,13 +43,15 @@ def _fetch_and_process_one_core(ts_code, name, industry, best_params, realtime_q
     Returns:
         tuple: (ts_code, name, industry, df_or_None)
     """
-    from classic_ta.stock_data_duckdb import get_stock_data_cached
+    from classic_ta.stock_data_duckdb import get_stock_data_readonly, _pending_write_queue
     from classic_ta.v60_ambush_model import IndicatorCalcBase
     from classic_ta.v63_ambush_model import add_micro_confirm_indicators, Detect_AmbushSignal_V63
     from classic_ta.v64_ambush_model import add_inst_support_indicators, Detect_AmbushSignal_V64
 
-    df = get_stock_data_cached(ts_code, min_rows=130)
+    df = get_stock_data_readonly(ts_code, min_rows=130)
     if df is None:
+        # 缓存缺失，放入待更新队列，跳过本次扫描
+        _pending_write_queue.put(ts_code)
         return (ts_code, name, industry, None)
 
     # 盘中模式：拼接实时K线
@@ -211,6 +213,26 @@ class SyncScanner:
         except Exception as e:
             logger.warning(f"断点续传状态文件清理失败: {e}")
 
+    def _flush_pending_writes(self):
+        """扫描结束后，单线程批量补全缓存缺失的股票数据"""
+        from classic_ta.stock_data_duckdb import _pending_write_queue, batch_update_stocks
+
+        pending_codes = []
+        while not _pending_write_queue.empty():
+            try:
+                ts_code = _pending_write_queue.get_nowait()
+                pending_codes.append(ts_code)
+            except Exception:
+                break
+
+        if pending_codes:
+            # 去重
+            pending_codes = list(set(pending_codes))
+            logger.info(f"缓存补全: {len(pending_codes)}只股票需要更新")
+            batch_update_stocks(pending_codes)
+        else:
+            logger.info("缓存完整，无需补全")
+
     def scan(self, industry_allow_matrix=None, industry_map=None,
              prefilter_df=None, realtime_quotes=None,
              oamv_weekly_allowed_dates=None):
@@ -315,6 +337,8 @@ class SyncScanner:
         logger.info(f"扫描完成! 耗时: {elapsed / 60:.1f}min | 信号: {len(signals)}只 | 错误: {errors}")
 
         self._clear_scan_status()
+        # 扫描完成后，单线程批量补全缓存缺失
+        self._flush_pending_writes()
         return signals, all_signals_data
 
 
@@ -343,6 +367,26 @@ class AsyncScanner:
         self.result_dir = result_dir or Path(__file__).parent.parent.parent / "results" / "v63_daily"
         self.result_dir = Path(self.result_dir)
         self.result_dir.mkdir(parents=True, exist_ok=True)
+
+    def _flush_pending_writes(self):
+        """扫描结束后，单线程批量补全缓存缺失的股票数据"""
+        from classic_ta.stock_data_duckdb import _pending_write_queue, batch_update_stocks
+
+        pending_codes = []
+        while not _pending_write_queue.empty():
+            try:
+                ts_code = _pending_write_queue.get_nowait()
+                pending_codes.append(ts_code)
+            except Exception:
+                break
+
+        if pending_codes:
+            # 去重
+            pending_codes = list(set(pending_codes))
+            logger.info(f"缓存补全: {len(pending_codes)}只股票需要更新")
+            batch_update_stocks(pending_codes)
+        else:
+            logger.info("缓存完整，无需补全")
 
     async def _async_fetch_one(self, ts_code, name, industry, session=None):
         """异步获取单只股票数据
@@ -463,6 +507,8 @@ class AsyncScanner:
         elapsed = time.time() - start_time
         logger.info(f"异步扫描完成! 耗时: {elapsed / 60:.1f}min | 信号: {len(signals)}只 | 错误: {errors}")
 
+        # 异步扫描完成后，单线程批量补全缓存缺失
+        self._flush_pending_writes()
         return signals, all_signals_data
 
 

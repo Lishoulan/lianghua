@@ -43,6 +43,7 @@ from classic_ta.v61_ambush_model import (
 from classic_ta.v62_ambush_model import (
     compute_industry_momentum, V62_PARAMS,
 )
+from classic_ta.common.order_execution import check_limit_order_fill
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -592,18 +593,23 @@ def StatefulTradeBacktester_V63(
                 continue
 
             if allow_buy and current_open > 0:
-                # ── 维度四：限价单执行 ──
+                # ── 维度四：限价单执行（含滑点和安全垫）──
                 if params.get("limit_order_enabled", False):
                     limit_price = pending_limit_price
 
-                    # 情况1：开盘价直接低于限价 → 以开盘价成交（更优价格）
-                    if current_open <= limit_price:
-                        fill_price = current_open
-                    # 情况2：盘中最低价触及限价 → 以限价成交
-                    elif current_low <= limit_price:
-                        fill_price = limit_price
-                    # 情况3：全天未触及限价 → 放弃
-                    else:
+                    # 构造T+1日K线数据
+                    next_bar = {
+                        "open": current_open,
+                        "high": float(row["High"]),
+                        "low": current_low,
+                        "close": current_price,
+                        "volume": float(row["Volume"]),
+                        "volume_ma": float(row.get("volume_ma", 0)),
+                    }
+                    filled, fill_price, fill_reason = check_limit_order_fill(
+                        limit_price, next_bar, params
+                    )
+                    if not filled:
                         pending_signal_idx = None
                         continue
                 else:
