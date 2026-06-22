@@ -51,7 +51,7 @@ def get_all_a_stocks():
         import tushare as ts
         token = os.getenv("TUSHARE_TOKEN")
         if not token:
-            return []
+            return _fallback_duckdb_stocks()
         pro = ts.pro_api(token)
         stock_basic = pro.stock_basic(exchange="", list_status="L",
                                        fields="ts_code,symbol,name,industry,list_date")
@@ -66,6 +66,41 @@ def get_all_a_stocks():
         return [(row["ts_code"], row["name"], row.get("industry", "")) for _, row in a_stocks.iterrows()]
     except Exception as e:
         logger.warning(f"获取股票列表失败: {e}")
+        return _fallback_duckdb_stocks()
+
+
+def _fallback_duckdb_stocks():
+    """DuckDB缓存回退：当akshare和tushare都不可用时，从缓存获取股票列表"""
+    try:
+        from classic_ta.stock_data_duckdb import DUCKDB_PATH
+        if not DUCKDB_PATH.exists():
+            logger.warning("DuckDB缓存文件不存在，无法回退")
+            return []
+        import duckdb
+        conn = duckdb.connect(str(DUCKDB_PATH), read_only=True)
+        result = conn.execute(
+            "SELECT DISTINCT ts_code FROM daily_data "
+            "WHERE ts_code LIKE '%.SH' OR ts_code LIKE '%.SZ' "
+            "ORDER BY ts_code"
+        ).fetchall()
+        conn.close()
+        stocks = []
+        for (ts_code,) in result:
+            code = ts_code.split('.')[0]
+            if code.startswith('8') or code.startswith('9'):
+                continue
+            if code.startswith('6'):
+                exchange = 'SH'
+            elif code.startswith('0') or code.startswith('3'):
+                exchange = 'SZ'
+            else:
+                continue
+            stocks.append((ts_code, code, ""))
+        logger.info(f"DuckDB缓存回退: 获取{len(stocks)}只股票")
+        print(f"  ⚠️ 在线数据源不可用，使用DuckDB缓存({len(stocks)}只股票)", flush=True)
+        return stocks
+    except Exception as e:
+        logger.warning(f"DuckDB缓存回退失败: {e}")
         return []
 
 
