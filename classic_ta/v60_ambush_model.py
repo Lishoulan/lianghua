@@ -240,6 +240,15 @@ def Detect_AmbushSignal(df: pd.DataFrame, params: Dict[str, Any] = None) -> pd.D
         & support_ok
     ).fillna(False)
 
+    # P2: 多日确认基础 —— 每日满足条件数（用于E7评分）
+    df["near_signal_count"] = (
+        sos_in_window.astype(int)
+        + j_oversold.astype(int)
+        + vol_shrink.astype(int)
+        + tiny_body.astype(int)
+        + support_ok.astype(int)
+    ).fillna(0)
+
     return df
 
 

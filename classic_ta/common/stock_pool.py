@@ -73,11 +73,8 @@ def batch_prefilter_stocks():
     """用akshare批量获取全市场实时行情，快速预筛选潜在信号股
 
     预筛选规则：
-      - 排除ST、北交所、停牌
-      - 涨跌幅 < 5%（排除已大涨）
-      - 价格 3~100元
-      - 换手率 >= 0.5%
-      - 涨跌幅 > -5%（排除暴跌）
+      - 排除ST、北交所、停牌、退市
+      - 价格 >= 3元（仅排除低价股，无上限）
 
     Returns:
         pd.DataFrame or None: 预筛选后的行情数据（含ts_code列）
@@ -113,17 +110,10 @@ def batch_prefilter_stocks():
         df["ts_code"] = df["代码"].apply(to_ts_code)
         df = df[df["ts_code"].notna()]
 
-        # 快速预筛选
-        if "涨跌幅" in df.columns:
-            df = df[df["涨跌幅"] < 5]
         if "最新价" in df.columns:
-            df = df[(df["最新价"] >= 3) & (df["最新价"] <= 100)]
-        if "换手率" in df.columns:
-            df = df[df["换手率"] >= 0.5]
-        if "涨跌幅" in df.columns:
-            df = df[df["涨跌幅"] > -5]
+            df = df[df["最新价"] >= 3]  # 仅排除低价股，不设上限（覆盖科创板高价股）
 
-        logger.info(f"批量预筛选: {len(df)}只（排除ST/停牌/北交所/已大涨/极端价格/低换手）")
+        logger.info(f"批量预筛选: {len(df)}只（排除ST/停牌/北交所/退市/低价股）")
         print(f"  ✅ 预筛选完成: {len(df)}只通过初筛", flush=True)
         return df
     except Exception as e:

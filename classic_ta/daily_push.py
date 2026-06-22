@@ -1,16 +1,15 @@
 """
 潜伏模型V6.4 每日实盘推送（统一版）
 ===========================
-基于V6.4优化参数 + 精细动态评分 + 分组推送 + 公众号群发
+基于V6.4优化参数 + 个股动量过滤 + 精细动态评分 + 分组推送 + 公众号群发
 
-优化参数:
-  - 评分阈值 3→5, J值超卖 25→5, SOS窗口 12→8
-  - 行业RS前30%→前20%, J极度超卖 0→3
+核心过滤链路:
+  V6.4信号检测 → 行业过滤(动量>0) → 个股动量过滤(10日跌幅<3%) → 评分加分(+1) → 动量硬过滤 → 精细动态评分
 
-精细动态评分:
-  - OAMV牛市: 评分>=5 或 (评分=4且J<5且量比<0.6)
-  - OAMV熊市: 评分>=6
-  - 所有信号 J<5
+个股动量过滤(甜蜜点):
+  - 个股10日收益 > -3% → 动量达标，评分+1分
+  - 个股10日收益 <= -3% → 动量不达标，直接移除
+  - 回测验证: 年31笔, 胜率57%, 均收益+8.21%, 大亏45笔(vs原70笔)
 
 推送内容：
   1. OAMV活跃市值择时状态
@@ -39,7 +38,7 @@ RESULT_DIR.mkdir(parents=True, exist_ok=True)
 # ── 公共模块导入 ──
 from classic_ta.common.push_channels import send_serverchan, send_group_push
 from classic_ta.common.oamv_status import get_oamv_status
-from classic_ta.common.industry_analysis import compute_industry_analysis
+from classic_ta.common.industry_analysis import compute_industry_analysis, compute_industry_lag_signals
 from classic_ta.common.stock_pool import (
     get_all_a_stocks, batch_prefilter_stocks,
     get_realtime_quotes, append_realtime_bar,
@@ -57,22 +56,45 @@ from classic_ta.stock_data_duckdb import get_cache_stats
 # ══════════════════════════════════════════════════════════
 BEST_PARAMS = V64_PARAMS.copy()
 BEST_PARAMS.update({
-    # 信号过滤参数（L方案：放宽评分到4分，信号数量+33%，5日胜率45.3%）
-    "entry_quality_min_score": 4,  # 5→4（4分信号5日胜率47.2%，质量优于5分）
+    # 信号过滤参数
+    # Task 2: 评分门槛 5→4（交易+21%，胜率+2.3pp，总收益+37%）
+    # Task 3: J值保持<5（放宽J值反而降低性能）
+    # Task 4: SOS窗口 8→10（交易+55.8%，胜率+0.3pp，总收益+17.7%）
+    "entry_quality_min_score": 4,
     "ambush_j_oversold": 5,
-    "ambush_window": 8,
+    "ambush_window": 10,  # 8→10（Task 4已验证最优）
     "industry_rs_top_pct": 0.20,
+    # 子模式过滤（评分=3排除J0V1，评分=4排除J1V0C1M2）
+    # 回测验证: J1V0C1M2胜率21.7%，过滤后score>=4总收益+63.7pp
     "eq_j_extreme": 3,
-    # 止损优化参数（J方案：全市场5年回测总收益+778%，盈亏比2.71）
+    "eq_sub_filter_score4_enabled": True,
+    # 止损优化参数
     "time_stop_loss": 0.0,          # 0.01→0.0（只有浮亏才时间止损）
     "time_stop_days": 10,           # 7→10（给趋势更多时间）
-    "max_hold_days": 30,            # 20→30（延长最大持仓）
+    "max_hold_days": 15,            # 30→15（退出优化: 加速资金周转，胜率+4.4pp，总收益+188pp）
     "chandelier_atr_mult": 3.0,     # 3.5→3.0（更紧的吊灯止盈）
     "dynamic_chandelier_low": 2.5,  # 3.0→2.5
     "dynamic_chandelier_mid": 3.0,  # 3.5→3.0
     "dynamic_chandelier_high": 3.5, # 4.0→3.5
     "breakeven_trigger_pct": 0.02,  # 0.03→0.02（更早激活保本）
     "breakeven_min_profit_pct": 0.003,  # 0.005→0.003
+    # 个股动量过滤（甜蜜点: stock > -3%）
+    "lag_filter_enabled": True,                # 启用个股动量过滤
+    "lag_industry_strong_threshold": 0.02,     # (保留，仅展示用)
+    "lag_relative_threshold": 0.03,            # (保留，未使用)
+    "lag_stock_max_return": -0.03,             # 个股N日收益下限: >-3%=最佳阈值(年31笔,胜率57%,大亏45笔)
+    "lag_score_boost": 1,                      # 动量达标评分加分: +1分
+    # P1-1: 信号复活机制（管线回测验证：复活信号质量差，总收益-44.2%，保持关闭）
+    "revival_enabled": False,
+    "revival_industry_min_score": 6,           # 行业过滤复活最低评分
+    "revival_momentum_min_score": 7,           # 动量过滤复活最低评分
+    "revival_momentum_min_eq_j_score": 2,      # 动量复活要求J分≥2
+    # P1-2: OAMV自适应过滤阈值（管线回测验证：交易+28%总收益+51.3%，已启用）
+    "adaptive_filter_enabled": True,
+    "bull_industry_top_pct": 0.40,             # 牛市行业RS阈值（前40%）
+    "bear_industry_top_pct": 0.20,             # 熊市行业RS阈值（前20%）
+    "bull_stock_max_return": -0.05,            # 牛市个股动量下限（允许跌5%）
+    "bear_stock_max_return": -0.03,            # 熊市个股动量下限（允许跌3%）
 })
 
 # 精细动态评分参数（配合entry_quality_min_score=4）
@@ -229,13 +251,34 @@ def daily_push():
     print("=" * 80, flush=True)
     print("潜伏模型V6.4 每日实盘推送（精细动态评分版）", flush=True)
     print(f"启动时间: {datetime.now(_BJT).strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-    print(f"优化参数: 评分≥5 | J<5 | window=8 | industry_top=20% | eq_j_extreme=3", flush=True)
-    print(f"动态评分: 牛市≥5或(4+J<5+量比<0.6) | 熊市≥6 | J<5", flush=True)
+    print(f"优化参数: 评分≥4 | J<5 | window=10 | mhd=15 | industry_top=20%", flush=True)
+    print(f"动态评分: 牛市≥4或(4+J<8+量比<0.7) | 熊市≥5 | J<8", flush=True)
     print("=" * 80, flush=True)
 
     # 交易日检查
     if not _is_trading_day():
-        print("📅 今日非交易日，跳过推送", flush=True)
+        print("📅 今日非交易日，跳过常规推送", flush=True)
+        # 节假日提示推送（让用户知道系统正常运行，只是休市）
+        try:
+            today_cn = datetime.now(_BJT).strftime("%Y-%m-%d")
+            weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][datetime.now(_BJT).weekday()]
+            holiday_title = f"📅 量化潜伏 {today_cn} | 休市日"
+            holiday_desp = f"""### 📅 今日休市提示
+
+- 📅 {today_cn} {weekday_cn}
+- 📊 状态: A股休市日（节假日或周末）
+- ⏸️ 操作: 今日无信号扫描，无推送内容
+
+### 💡 说明
+- 量化系统正常运行，仅因休市跳过扫描
+- 下一个交易日将自动恢复推送
+- 如需手动触发，可在 GitHub Actions 使用 workflow_dispatch
+
+> ⚡ 量化潜伏系统 V6.4"""
+            print(f"  📢 推送节假日提示...", flush=True)
+            send_group_push(holiday_title, holiday_desp, holiday_title, holiday_desp)
+        except Exception as e:
+            print(f"  ⚠️ 节假日提示推送失败（非致命）: {e}", flush=True)
         return
 
     # 0. 数据预热
@@ -326,6 +369,7 @@ def daily_push():
             industry_allow_matrix = build_industry_allow_matrix(mom_df, mom_threshold)
 
         filtered_signals = []
+        industry_killed = []  # P1-1: 信号复活机制 - 记录被行业过滤杀掉的信号
         for s in signals:
             industry = s.get("industry", "")
             if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
@@ -333,13 +377,71 @@ def daily_push():
                     signal_date = pd.Timestamp(s["signal_date"])
                     ind_val = industry_allow_matrix[industry].reindex([signal_date])
                     if not ind_val.empty and not ind_val.iloc[0]:
+                        industry_killed.append(s)
                         continue
                 except Exception:
                     pass
             filtered_signals.append(s)
         print(f"  行业过滤: {len(signals)}只 → {len(filtered_signals)}只", flush=True)
         signals = filtered_signals
+
+        # 5.5 个股动量过滤（P1-2: OAMV自适应阈值）
+        if signals and not mom_df.empty:
+            # P1-2: 根据OAMV状态动态调整动量阈值
+            is_bull = oamv_status and oamv_status.get("can_open_position", False)
+            if BEST_PARAMS.get("adaptive_filter_enabled", False) and is_bull:
+                adaptive_params = BEST_PARAMS.copy()
+                adaptive_params["lag_stock_max_return"] = BEST_PARAMS.get("bull_stock_max_return", -0.05)
+                print(f"  📈 牛市自适应: 动量阈值放宽到 {adaptive_params['lag_stock_max_return']}", flush=True)
+            else:
+                adaptive_params = BEST_PARAMS
+
+            before_momentum = len(signals)
+            signals = compute_industry_lag_signals(signals, mom_df, adaptive_params)
+            momentum_ok_count = sum(1 for s in signals if s.get("stock_momentum_ok"))
+            momentum_fail_count = before_momentum - momentum_ok_count
+            print(f"  📊 个股动量过滤: {before_momentum}只 → 达标{momentum_ok_count}只 "
+                  f"(不达标{momentum_fail_count}只将被动态评分过滤)", flush=True)
     _step_time("行业分析", _t)
+
+    # 5.6 个股动量硬过滤（动量不达标的信号直接移除）
+    momentum_killed = []  # P1-1: 记录被动量过滤杀掉的信号
+    if BEST_PARAMS.get("lag_filter_enabled", False):
+        before_hard = len(signals)
+        new_signals = []
+        for s in signals:
+            if s.get("stock_momentum_ok", True):
+                new_signals.append(s)
+            else:
+                momentum_killed.append(s)
+        signals = new_signals
+        if before_hard != len(signals):
+            print(f"  动量硬过滤: {before_hard}只 → {len(signals)}只 "
+                  f"(移除{before_hard - len(signals)}只动量不达标)", flush=True)
+
+    # P1-1: 信号复活机制 —— 高质量信号被行业/动量过滤误杀时复活
+    if BEST_PARAMS.get("revival_enabled", False):
+        revival_count = 0
+        revival_industry_min = BEST_PARAMS.get("revival_industry_min_score", 6)
+        revival_momentum_min = BEST_PARAMS.get("revival_momentum_min_score", 7)
+        revival_j_min = BEST_PARAMS.get("revival_momentum_min_eq_j_score", 2)
+
+        # 复活被行业过滤杀掉的高分信号
+        for s in industry_killed:
+            if s.get("entry_quality_score", 0) >= revival_industry_min:
+                signals.append(s)
+                revival_count += 1
+
+        # 复活被动量过滤杀掉的极高质量信号
+        for s in momentum_killed:
+            if (s.get("entry_quality_score", 0) >= revival_momentum_min
+                  and s.get("eq_j_score", 0) >= revival_j_min):
+                signals.append(s)
+                revival_count += 1
+
+        if revival_count > 0:
+            print(f"  🔄 信号复活: {revival_count}只高分信号被复活 "
+                  f"(行业复活分≥{revival_industry_min}, 动量复活分≥{revival_momentum_min}+J分≥{revival_j_min})", flush=True)
 
     # 6. 精细动态评分过滤
     _t = _time.time()

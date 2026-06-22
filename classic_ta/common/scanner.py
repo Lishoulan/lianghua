@@ -105,6 +105,7 @@ def _extract_signal_info(ts_code, name, industry, df, best_params):
         dict or None: 信号信息，如果不是信号日则返回None
     """
     from classic_ta.common.signal_analyzer import analyze_signal_detail
+    from classic_ta.common.t_trading import analyze_t_trading
 
     latest = df.iloc[-1]
     if pd.isna(latest.get("yellow_line")) or pd.isna(latest.get("white_line")):
@@ -117,7 +118,17 @@ def _extract_signal_info(ts_code, name, industry, df, best_params):
     change_pct = (latest["Close"] - prev["Close"]) / prev["Close"] * 100
     vol_ratio = latest["Volume"] / latest["volume_ma"] if latest["volume_ma"] > 0 else 0
 
+    # 个股N日累计收益率（与行业动量同窗口，用于行业滞涨股识别）
+    mom_days = best_params.get("industry_momentum_days", 10)
+    stock_ret_n = None
+    if len(df) > mom_days:
+        close_now = float(latest["Close"])
+        close_prev = float(df.iloc[-(mom_days + 1)]["Close"])
+        if close_prev > 0:
+            stock_ret_n = round((close_now - close_prev) / close_prev, 4)
+
     detail = analyze_signal_detail(df, len(df) - 1, best_params)
+    t_info = analyze_t_trading(df, len(df) - 1)
 
     window = best_params["ambush_window"]
     sos_dates = []
@@ -155,6 +166,8 @@ def _extract_signal_info(ts_code, name, industry, df, best_params):
         "factor_b": bool(latest.get("factor_b_vp_divergence", False)),
         "factor_c": bool(latest.get("factor_c_support_hold", False)),
         "factor_d": bool(latest.get("factor_d_intraday_accum", False)),
+        "stock_ret_n": stock_ret_n,
+        "t_trading": t_info,
     }
     return signal_info
 

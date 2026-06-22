@@ -104,6 +104,16 @@ V64_PARAMS.update({
     "eq_sub_filter_max_score": 3,        # 仅对score=3启用
     "eq_sub_filter_exclude_v1_j0": True, # 排除V=1且J=0
 
+    # V6.4.10：评分=4子模式过滤（排除J1V0C1M2弱组合）
+    # 回测验证: J1V0C1M2胜率21.7%, 过滤后总收益+63.7pp
+    "eq_sub_filter_score4_enabled": False,  # 默认关闭，在BEST_PARAMS中启用
+
+    # P2: 多日确认评分（E7，加分项）
+    "eq_persist_enabled": False,          # 默认关闭，待回测验证
+    "eq_persist_lookback": 2,             # 回看天数（T-1, T-2）
+    "eq_persist_min_conds": 3,            # 近信号最少满足条件数（3/5）
+    "eq_persist_score": 1,                # 加分值
+
     # --- 旧因子体系（保留用于对比）---
     "inst_support_enabled": False,       # 关闭旧的B+C+D评分
     "factor_d_required": False,
@@ -229,11 +239,55 @@ def add_entry_quality_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Da
     else:
         df["eq_ma_score"] = 0
 
-    # 综合评分
-    df["entry_quality_score"] = (
+    # 综合评分（E1-E4，0-8分）
+    base_score = (
         df["eq_j_score"] + df["eq_vol_score"]
         + df["eq_candle_score"] + df["eq_ma_score"]
     )
+
+    # E7: 多日确认评分（Persistent Near-Miss）
+    # 如果T-1或T-2日也接近信号条件（≥3/5条件满足），说明蓄力更充分
+    if params.get("eq_persist_enabled", False):
+        lookback = params.get("eq_persist_lookback", 2)
+        min_conds = params.get("eq_persist_min_conds", 3)
+        persist_score_val = params.get("eq_persist_score", 1)
+
+        # 直接计算每日满足条件数（不依赖Detect_AmbushSignal的输出）
+        if "near_signal_count" in df.columns:
+            nsc = df["near_signal_count"]
+        else:
+            # 重新计算5个基础条件
+            body_p = (df["Close"] - df["Open"]).abs()
+            window = params.get("ambush_window", 8)
+            j_os = params.get("ambush_j_oversold", 5)
+            vol_sh = params.get("ambush_vol_shrink", 0.70)
+            body_pct = params.get("ambush_body_pct", 0.03)
+            sup_atr = params.get("ambush_support_atr", 0.5)
+
+            # 条件1: SOS（简化：用tag_sos_anchor如果存在）
+            if "tag_sos_anchor" in df.columns:
+                sos_w = df["tag_sos_anchor"].shift(1).rolling(window, min_periods=1).max().astype(bool)
+            else:
+                sos_w = pd.Series(True, index=df.index)  # 默认True（不限制）
+
+            j_ok = df["J"] < j_os
+            vol_ok = df["Volume"] < df["volume_ma"] * vol_sh
+            body_ok = body_p / (df["Close"] + 1e-8) < body_pct
+            sup_ok = df["Close"] > df["yellow_line"] - sup_atr * df["atr14"]
+
+            nsc = (sos_w.astype(int) + j_ok.astype(int) + vol_ok.astype(int)
+                   + body_ok.astype(int) + sup_ok.astype(int))
+
+        prev_near = nsc.shift(1) >= min_conds
+        prev2_near = nsc.shift(2) >= min_conds if lookback >= 2 else pd.Series(False, index=df.index)
+
+        df["eq_persist_score"] = 0
+        df.loc[prev_near | prev2_near, "eq_persist_score"] = persist_score_val
+    else:
+        df["eq_persist_score"] = 0
+
+    # 最终综合评分（0-9分）
+    df["entry_quality_score"] = base_score + df["eq_persist_score"]
 
     # E5: 趋势方向（黄线是否上升 = 底部是否抬升）
     if params.get("eq_trend_dir_enabled", True):
@@ -448,6 +502,20 @@ def Detect_AmbushSignal_V64(df: pd.DataFrame, params: Dict[str, Any] = None) -> 
                 weak_pattern = (df["eq_vol_score"] == 1) & (df["eq_j_score"] == 0)
                 sub_filter = ~is_target_score | ~weak_pattern
                 quality_filter = quality_filter & sub_filter
+
+        # V6.4.10：评分=4子模式过滤（排除J1V0C1M2弱组合）
+        # 回测验证: J1V0C1M2胜率21.7%, 均收益-2.77%, 总贡献-63.7%
+        # "形态好但J不深+量不枯"的4分信号质量差
+        if params.get("eq_sub_filter_score4_enabled", False):
+            is_score4 = df["entry_quality_score"] == 4
+            weak_j1v0c1m2 = (
+                (df["eq_j_score"] == 1) &
+                (df["eq_vol_score"] == 0) &
+                (df["eq_candle_score"] == 1) &
+                (df["eq_ma_score"] == 2)
+            )
+            score4_filter = ~is_score4 | ~weak_j1v0c1m2
+            quality_filter = quality_filter & score4_filter
 
         df["ambush_signal"] = df["ambush_signal"] & quality_filter
 

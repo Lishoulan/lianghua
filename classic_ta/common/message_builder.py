@@ -116,6 +116,12 @@ def build_push_message(oamv_status, signals, industry_stats, best_params, is_int
         if rotation_parts:
             lines.append(f"- {' | '.join(rotation_parts)}")
 
+        # 动量达标信号统计
+        momentum_industries = set(s.get("industry", "") for s in signals if s.get("stock_momentum_ok"))
+        momentum_count = sum(1 for s in signals if s.get("stock_momentum_ok"))
+        if momentum_count:
+            lines.append(f"- 📊 动量达标: {momentum_count}只信号(10日跌幅<5%), 涉及{len(momentum_industries)}个行业")
+
     # 四、潜伏信号
     lines.append("")
     lines.append(f"### 🎯 潜伏信号")
@@ -248,7 +254,17 @@ def build_beta_push_message(oamv_status, signals, industry_stats, best_params, i
                 if tags:
                     lines.append(f"   {' '.join(tags)}")
                 lines.append(f"   评分:{eq}/8 | J:{j:.0f} | 量比:{vr:.2f} | {pos}")
+                if s.get('stock_momentum_ok'):
+                    stk_r = s.get('stock_ret_n', 0) or 0
+                    lines.append(f"   📊 动量{stk_r * 100:+.1f}%(10日)")
                 lines.append(f"   止损:{s['hard_stop']:.2f} | 持仓10天")
+                # 做T精简提示
+                t_info = s.get("t_trading")
+                if t_info and t_info.get("mode") != "观望":
+                    t_mode = t_info["mode"]
+                    buy_short = (t_info.get("buy_signal") or "—").split("|")[0].strip()[:20]
+                    sell_short = (t_info.get("sell_signal") or "—").split("|")[0].strip()[:20]
+                    lines.append(f"   🔄 做T: {t_mode} | 买:{buy_short} | 卖:{sell_short}")
                 lines.append("")
 
         if normal_signals:
@@ -260,7 +276,17 @@ def build_beta_push_message(oamv_status, signals, industry_stats, best_params, i
                 change_sign = "+" if s['change_pct'] >= 0 else ""
                 lines.append(f"{i}. {s['name']}({s['code']}) {s['price']:.2f} {change_sign}{s['change_pct']:.2f}%")
                 lines.append(f"   评分:{eq}/8 | J:{j:.0f} | 量比:{vr:.2f} | 仓位5%")
+                if s.get('stock_momentum_ok'):
+                    stk_r = s.get('stock_ret_n', 0) or 0
+                    lines.append(f"   📊 动量{stk_r * 100:+.1f}%(10日)")
                 lines.append(f"   止损:{s['hard_stop']:.2f} | 持仓10天")
+                # 做T精简提示
+                t_info = s.get("t_trading")
+                if t_info and t_info.get("mode") != "观望":
+                    t_mode = t_info["mode"]
+                    buy_short = (t_info.get("buy_signal") or "—").split("|")[0].strip()[:20]
+                    sell_short = (t_info.get("sell_signal") or "—").split("|")[0].strip()[:20]
+                    lines.append(f"   🔄 做T: {t_mode} | 买:{buy_short} | 卖:{sell_short}")
                 lines.append("")
 
     # 仓位管理
@@ -390,6 +416,10 @@ def _append_signal_detail(lines, s, index, icon, is_priority=True):
     if wyckoff:
         lines.append(f"🔍 威科夫: {'; '.join(wyckoff)}")
 
+    # 个股动量标签
+    if s.get("stock_momentum_ok"):
+        lines.append(f"📊 动量: {s.get('momentum_tag', '')}")
+
     # VPA量价
     vpa = analysis.get('vpa', [])
     if vpa:
@@ -404,6 +434,29 @@ def _append_signal_detail(lines, s, index, icon, is_priority=True):
     support = analysis.get('support', s['yellow_line'])
     resistance = analysis.get('resistance', s['yellow_line'])
     lines.append(f"🎯 支撑:{support} | 阻力:{resistance}")
+    # 做T建议（知行合一双轨趋势系统）
+    t_info = s.get("t_trading")
+    if t_info:
+        t_mode = t_info.get("mode", "观望")
+        if t_mode == "观望":
+            lines.append(f"")
+            lines.append(f"🔄 做T: 观望（{t_info.get('risk_alert', '振幅不足') or '振幅不足'}）")
+        else:
+            mode_icon = "📈" if t_mode == "正T" else "📉"
+            slope = t_info.get("yellow_slope", "走平")
+            amp = t_info.get("amplitude", 0)
+            lines.append(f"")
+            lines.append(f"🔄 做T建议 [{mode_icon} {t_mode}]")
+            lines.append(f"   黄线斜率: {slope} | 振幅: {amp:.1f}%")
+            buy_sig = t_info.get("buy_signal")
+            if buy_sig:
+                lines.append(f"   买入: {buy_sig}")
+            sell_sig = t_info.get("sell_signal")
+            if sell_sig:
+                lines.append(f"   卖出: {sell_sig}")
+            risk_alert = t_info.get("risk_alert")
+            if risk_alert:
+                lines.append(f"   ⚠️ 风控: {risk_alert}")
 
     # 交易参考
     lines.append(f"")
