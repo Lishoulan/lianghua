@@ -86,10 +86,13 @@ jobs:
           )
 
           SUCCESS_COUNT=$(
-            gh api repos/${{ github.repository }}/actions/runs \
-              -f event=schedule \
-              -f per_page=50 \
-              --jq "[.workflow_runs[] | select(.name == \"Daily Push\" and .status == \"completed\" and .conclusion == \"success\" and (.created_at | startswith(\"${TODAY_BJT}\")))] | length"
+            gh run list \
+              -R ${{ github.repository }} \
+              -w "Daily Push" \
+              --event schedule \
+              --limit 50 \
+              --json conclusion,status,createdAt \
+              --jq "[.[] | select(.status == \"completed\" and .conclusion == \"success\" and (.createdAt | startswith(\"${TODAY_BJT}\")))] | length"
           )
 
           HEALTHY="false"
