@@ -230,10 +230,29 @@ class TestApplyDynamicScoreFilter:
         }
         oamv_status = {"can_open_position": True}
         result = apply_dynamic_score_filter(signals, oamv_status, dsp)
+        assert result == []
+
+    def test_bull_market_score4_special_rule_with_explicit_opt_in(self):
+        """Score-4 bull exceptions still work when explicitly enabled."""
+        signals = [
+            {"code": "A", "J": 3, "entry_quality_score": 4, "vol_ratio": 0.50},
+            {"code": "B", "J": 6, "entry_quality_score": 4, "vol_ratio": 0.50},
+            {"code": "C", "J": 3, "entry_quality_score": 4, "vol_ratio": 0.70},
+        ]
+        dsp = {
+            "j_hard_cap": 5,
+            "bull_min_score": 5,
+            "bull_score4_j_max": 5,
+            "bull_score4_vol_ratio_max": 0.60,
+            "bear_min_score": 6,
+            "allow_bull_score4_exception": True,
+        }
+        oamv_status = {"can_open_position": True}
+        result = apply_dynamic_score_filter(signals, oamv_status, dsp)
         codes = [s["code"] for s in result]
         assert "A" in codes
-        assert "B" not in codes  # J=6 > j_hard_cap=5
-        assert "C" not in codes  # vol_ratio=0.70 > 0.60
+        assert "B" not in codes
+        assert "C" not in codes
 
     def test_bear_market_rules(self, sample_signals):
         """熊市规则：只有评分>=bear_min_score的信号通过"""
