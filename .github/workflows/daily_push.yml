@@ -145,6 +145,7 @@ jobs:
           key: stock-cache-v5-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
           restore-keys: |
             stock-cache-v5-${{ runner.os }}-
+            stock-cache-v4-${{ runner.os }}
             stock-cache-v4-${{ runner.os }}-
 
       - name: Install dependencies
@@ -228,6 +229,7 @@ jobs:
           key: stock-cache-v5-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
           restore-keys: |
             stock-cache-v5-${{ runner.os }}-
+            stock-cache-v4-${{ runner.os }}
             stock-cache-v4-${{ runner.os }}-
 
       - name: Install dependencies
