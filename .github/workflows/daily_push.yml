@@ -2,14 +2,12 @@ name: Daily Push
 
 on:
   schedule:
-    # ── 盘中梯度触发 ──
-    - cron: '15 5 * * 1-5'   # 北京13:15 提前触发
-    - cron: '30 5 * * 1-5'   # 北京13:30 主触发
-    - cron: '50 5 * * 1-5'   # 北京13:50 兜底触发
-    # ── 盘后梯度触发 ──
-    - cron: '15 9 * * 1-5'   # 北京17:15 提前触发
-    - cron: '30 9 * * 1-5'   # 北京17:30 主触发
-    - cron: '50 9 * * 1-5'   # 北京17:50 兜底触发
+    - cron: '15 5 * * 1-5'
+    - cron: '30 5 * * 1-5'
+    - cron: '50 5 * * 1-5'
+    - cron: '15 9 * * 1-5'
+    - cron: '30 9 * * 1-5'
+    - cron: '50 9 * * 1-5'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -17,7 +15,6 @@ on:
         required: false
         default: 'false'
 
-# ── 同一时间只允许一个实例运行，防重复逻辑由 check-duplicate job 负责 ──
 concurrency:
   group: daily-push
   cancel-in-progress: false
@@ -33,34 +30,51 @@ jobs:
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_EXPR: ${{ github.event.schedule }}
         run: |
-          # 判断时段
-          UTC_HOUR=$(date -u +%H)
-          UTC_MIN=$(date -u +%M)
-          UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
-
-          if [ $UTC_MIN_TOTAL -ge 240 ] && [ $UTC_MIN_TOTAL -lt 420 ]; then
-            SLOT="intraday"
-          elif [ $UTC_MIN_TOTAL -ge 480 ] && [ $UTC_MIN_TOTAL -lt 660 ]; then
-            SLOT="after_hours"
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            case "$SCHEDULE_EXPR" in
+              "15 5 * * 1-5"|"30 5 * * 1-5"|"50 5 * * 1-5")
+                SLOT="intraday"
+                ;;
+              "15 9 * * 1-5"|"30 9 * * 1-5"|"50 9 * * 1-5")
+                SLOT="after_hours"
+                ;;
+              *)
+                SLOT="unknown"
+                ;;
+            esac
           else
-            SLOT="unknown"
-          fi
-          echo "time_slot=$SLOT" >> $GITHUB_OUTPUT
+            UTC_HOUR=$(date -u +%H)
+            UTC_MIN=$(date -u +%M)
+            UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
 
-          # 幂等锁：检查今天同时段是否已有成功的 push artifact
-          TODAY=$(date +'%Y-%m-%d')
+            if [ "$UTC_MIN_TOTAL" -ge 240 ] && [ "$UTC_MIN_TOTAL" -lt 420 ]; then
+              SLOT="intraday"
+            elif [ "$UTC_MIN_TOTAL" -ge 480 ] && [ "$UTC_MIN_TOTAL" -lt 660 ]; then
+              SLOT="after_hours"
+            else
+              SLOT="unknown"
+            fi
+          fi
+          echo "time_slot=$SLOT" >> "$GITHUB_OUTPUT"
+
+          TODAY=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')
           ARTIFACT_NAME="push-results-${TODAY}-${SLOT}"
 
-          # 使用 GitHub API 查询 artifacts
-          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/artifacts --jq ".artifacts[] | select(.name == \"${ARTIFACT_NAME}\") | .id" 2>/dev/null || echo "")
+          ARTIFACTS=$(
+            gh api repos/${{ github.repository }}/actions/artifacts \
+              --jq ".artifacts[] | select(.name == \"${ARTIFACT_NAME}\") | .id" \
+              2>/dev/null || true
+          )
 
           if [ -n "$ARTIFACTS" ]; then
-            echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "⏭️ 今日${SLOT}时段已成功推送，跳过"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Skip ${SLOT}: artifact ${ARTIFACT_NAME} already exists."
           else
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            echo "✅ 今日${SLOT}时段未推送，继续执行"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Run ${SLOT}: artifact ${ARTIFACT_NAME} not found."
           fi
 
   daily-push:
@@ -74,32 +88,34 @@ jobs:
 
       - name: Log trigger time and detect delay
         id: trigger_info
+        env:
+          SCHEDULE_EXPR: ${{ github.event.schedule }}
         run: |
           echo "=== Workflow Trigger Info ==="
           echo "Trigger time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
           echo "Trigger time (Beijing): $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
           echo "Time slot: ${{ needs.check-duplicate.outputs.time_slot }}"
+          echo "Schedule expression: ${SCHEDULE_EXPR:-manual}"
 
-          # 计算延迟（与预期触发时间对比）
           UTC_HOUR=$(date -u +%H)
           UTC_MIN=$(date -u +%M)
           UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
 
           SLOT="${{ needs.check-duplicate.outputs.time_slot }}"
           if [ "$SLOT" = "intraday" ]; then
-            EXPECTED_MIN=315  # 05:15 UTC
+            EXPECTED_MIN=315
           elif [ "$SLOT" = "after_hours" ]; then
-            EXPECTED_MIN=555  # 09:15 UTC
+            EXPECTED_MIN=555
           else
             EXPECTED_MIN=$UTC_MIN_TOTAL
           fi
 
           DELAY_MIN=$((UTC_MIN_TOTAL - EXPECTED_MIN))
           echo "Delay: ${DELAY_MIN} minutes"
-          if [ $DELAY_MIN -gt 10 ]; then
-            echo "⚠️ Trigger delayed by ${DELAY_MIN} minutes!"
+          if [ "$DELAY_MIN" -gt 10 ]; then
+            echo "Trigger delayed by ${DELAY_MIN} minutes."
           fi
-          echo "delay_minutes=$DELAY_MIN" >> $GITHUB_OUTPUT
+          echo "delay_minutes=$DELAY_MIN" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -107,20 +123,29 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Get current date
+      - name: Get current Beijing date
         id: date
-        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+        run: echo "today=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache stock data & OAMV cache
+      - name: Build unique cache key
+        id: cache_meta
+        env:
+          TIME_SLOT: ${{ needs.check-duplicate.outputs.time_slot }}
+        run: |
+          SUFFIX="$(TZ='Asia/Shanghai' date +'%Y%m%d-%H%M%S')-${TIME_SLOT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "cache_suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "Cache suffix: $SUFFIX"
+
+      - name: Cache stock data and OAMV cache
         uses: actions/cache@v4
         with:
           path: |
             results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v4-${{ runner.os }}
+          key: stock-cache-v5-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
           restore-keys: |
+            stock-cache-v5-${{ runner.os }}-
             stock-cache-v4-${{ runner.os }}-
-            stock-cache-v3-${{ runner.os }}-
 
       - name: Install dependencies
         timeout-minutes: 5
@@ -136,7 +161,7 @@ jobs:
           import sys; sys.path.insert(0,'.')
           from classic_ta.stock_data_duckdb import get_cache_stats
           stats = get_cache_stats()
-          print(f'Cache status: {stats.get(\"count\",0)} stocks, {stats.get(\"size_mb\",0)}MB')
+          print(f'Cache status: {stats.get(\"count\", 0)} stocks, {stats.get(\"size_mb\", 0)}MB')
           "
 
       - name: Run Daily Push
@@ -166,7 +191,6 @@ jobs:
           path: results/daily/
           retention-days: 30
 
-  # ── 失败重试：主任务失败或超时取消后自动重试一次 ──
   retry-push:
     name: Retry if failed
     needs: [check-duplicate, daily-push]
@@ -182,20 +206,29 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Get current date
+      - name: Get current Beijing date
         id: date
-        run: echo "today=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+        run: echo "today=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache stock data & OAMV cache
+      - name: Build unique cache key
+        id: cache_meta
+        env:
+          TIME_SLOT: ${{ needs.check-duplicate.outputs.time_slot }}
+        run: |
+          SUFFIX="$(TZ='Asia/Shanghai' date +'%Y%m%d-%H%M%S')-${TIME_SLOT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-retry"
+          echo "cache_suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "Cache suffix: $SUFFIX"
+
+      - name: Cache stock data and OAMV cache
         uses: actions/cache@v4
         with:
           path: |
             results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v4-${{ runner.os }}
+          key: stock-cache-v5-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
           restore-keys: |
+            stock-cache-v5-${{ runner.os }}-
             stock-cache-v4-${{ runner.os }}-
-            stock-cache-v3-${{ runner.os }}-
 
       - name: Install dependencies
         timeout-minutes: 5
@@ -226,7 +259,6 @@ jobs:
           path: results/daily/
           retention-days: 30
 
-  # ── 最终失败告警：重试仍失败时创建 Issue 通知 ──
   alert-on-failure:
     name: Alert on persistent failure
     needs: [check-duplicate, daily-push, retry-push]
@@ -241,39 +273,33 @@ jobs:
           script: |
             const date = new Date().toISOString().slice(0, 10);
             const slot = '${{ needs.check-duplicate.outputs.time_slot }}';
-            const slotCn = slot === 'intraday' ? '盘中' : slot === 'after_hours' ? '盘后' : '未知';
+            const slotLabel = slot === 'intraday' ? 'intraday' : slot === 'after_hours' ? 'after-hours' : 'unknown';
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
-            // 查找是否已有同日未关闭的告警 Issue
             const issues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               labels: ['push-failure', 'auto-alert'],
-              per_page: 50
+              per_page: 50,
             });
 
-            const existing = issues.data.find(i =>
-              i.title.includes(date) && i.title.includes(slotCn)
+            const existing = issues.data.find((issue) =>
+              issue.title.includes(date) && issue.title.includes(slotLabel)
             );
 
             const body = [
-              `## 推送失败告警`,
-              ``,
-              `| 项目 | 值 |`,
-              `|------|-----|`,
-              `| 日期 | ${date} |`,
-              `| 时段 | ${slotCn} (${slot}) |`,
-              `| 运行链接 | [查看](${runUrl}) |`,
-              `| 触发时间 | ${new Date().toISOString()} |`,
-              ``,
-              `### 排查建议`,
-              `1. 检查 [运行日志](${runUrl}) 中的错误信息`,
-              `2. 确认 \`TUSHARE_TOKEN\` / \`SERVERCHAN_KEY\` 等 Secrets 是否有效`,
-              `3. 确认数据源（akshare/tushare/mootdx）是否可用`,
-              `4. 如为网络问题，可手动触发 [workflow_dispatch](${runUrl}) 重试`,
-              ``,
-              `此 Issue 由 GitHub Actions 自动创建，推送成功后将自动关闭。`
+              '## Daily push failure alert',
+              '',
+              `- Date: ${date}`,
+              `- Time slot: ${slotLabel} (${slot})`,
+              `- Run URL: ${runUrl}`,
+              '',
+              'Suggested checks:',
+              '1. Review the workflow logs for the exact exception.',
+              '2. Verify TUSHARE_TOKEN, SERVERCHAN_KEY, and related secrets.',
+              '3. Confirm data providers such as akshare, tushare, and mootdx are reachable.',
+              '4. If this looks transient, trigger workflow_dispatch to retry manually.',
             ].join('\n');
 
             if (existing) {
@@ -281,19 +307,18 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: existing.number,
-                body: `⚠️ **再次失败** - ${new Date().toISOString()}\n\n${body}`
+                body: `Repeated failure detected.\n\n${body}`,
               });
             } else {
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                title: `[推送失败] ${date} ${slotCn}推送`,
-                body: body,
-                labels: ['push-failure', 'auto-alert']
+                title: `[Daily Push Failure] ${date} ${slotLabel}`,
+                body,
+                labels: ['push-failure', 'auto-alert'],
               });
             }
 
-  # ── 推送成功后关闭历史告警 Issue ──
   close-alerts-on-success:
     name: Close stale alerts on success
     needs: [check-duplicate, daily-push]
@@ -310,19 +335,21 @@ jobs:
               repo: context.repo.repo,
               state: 'open',
               labels: ['push-failure', 'auto-alert'],
-              per_page: 20
+              per_page: 20,
             });
+
             for (const issue of issues.data) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issue.number,
-                body: `✅ 推送已恢复正常，自动关闭告警。`
+                body: 'Daily push recovered successfully. Closing this auto alert.',
               });
+
               await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issue.number,
-                state: 'closed'
+                state: 'closed',
               });
             }

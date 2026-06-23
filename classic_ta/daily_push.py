@@ -189,7 +189,10 @@ def prewarm_data():
     print("\n[预热] 数据源健康预检...", flush=True)
 
     cache_stats = get_cache_stats()
-    print(f"  DuckDB缓存: {cache_stats.get('count', 0)}只股票 | {cache_stats.get('size_mb', 0)}MB", flush=True)
+    cache_count = int(cache_stats.get("count", 0) or 0)
+    cache_size_mb = cache_stats.get("size_mb", 0)
+    cache_ready = cache_count >= 1000
+    print(f"  DuckDB缓存: {cache_count}只股票 | {cache_size_mb}MB", flush=True)
 
     # 快速连通性检查（每个数据源5秒超时）
     akshare_ok = False
@@ -209,8 +212,8 @@ def prewarm_data():
     try:
         import tushare as ts
         pro = ts.pro_api(os.getenv("TUSHARE_TOKEN"))
-        cal = pro.trade_cal(exchange="SSE", is_open="1", limit=1)
-        if cal is not None and len(cal) > 0:
+        basic = pro.stock_basic(exchange="", list_status="L", fields="ts_code", limit=1)
+        if basic is not None and len(basic) > 0:
             tushare_ok = True
             print("  ✅ tushare接口: 可用", flush=True)
         else:
@@ -219,7 +222,10 @@ def prewarm_data():
         print(f"  ❌ tushare接口: 不可用 ({e})", flush=True)
 
     if not akshare_ok and not tushare_ok:
-        raise RuntimeError("❌ 所有数据源不可用，终止扫描等待重试触发")
+        if cache_ready:
+            print("  ⚠️ 外部数据源暂时不可用，降级使用DuckDB缓存继续扫描", flush=True)
+        else:
+            raise RuntimeError("❌ 所有数据源不可用，且本地缓存不足，终止扫描等待重试触发")
 
     now = datetime.now(_BJT)
     hour = now.hour
