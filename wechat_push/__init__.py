@@ -18,15 +18,15 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 
 # 环境变量
-WECHAT_APP_ID = os.getenv("WECHAT_APP_ID", "")
-WECHAT_APP_SECRET = os.getenv("WECHAT_APP_SECRET", "")
-WECHAT_TOKEN = os.getenv("WECHAT_TOKEN", "lianghua2026")
-WECHAT_ENCODING_AES_KEY = os.getenv("WECHAT_ENCODING_AES_KEY", "")
-PUSH_API_KEY = os.getenv("PUSH_API_KEY", "lianghua_push_2026")
+WECHAT_APP_ID = os.getenv("WECHAT_APP_ID", "").strip()
+WECHAT_APP_SECRET = os.getenv("WECHAT_APP_SECRET", "").strip()
+WECHAT_TOKEN = os.getenv("WECHAT_TOKEN", "lianghua2026").strip()
+WECHAT_ENCODING_AES_KEY = os.getenv("WECHAT_ENCODING_AES_KEY", "").strip()
+PUSH_API_KEY = os.getenv("PUSH_API_KEY", "lianghua_push_2026").strip()
 
 # Supabase
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
 
 
 # ══════════════════════════════════════════════════════════

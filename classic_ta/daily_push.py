@@ -528,6 +528,8 @@ def daily_push():
     # ══════════════════════════════════════════════════════════
     #  公众号群发（仅盘后模式）
     # ══════════════════════════════════════════════════════════
+    wechat_ok = False
+    wechat_skipped = False
     if not is_intraday:
         print("\n" + "=" * 60, flush=True)
         print("📢 公众号群发（盘后）", flush=True)
@@ -536,8 +538,8 @@ def daily_push():
             from wechat_push import push_signals_to_wechat
             wechat_result = push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=False)
             wechat_ok = wechat_result.get("success", False)
-            skipped = wechat_result.get("skipped", False)
-            if skipped:
+            wechat_skipped = wechat_result.get("skipped", False)
+            if wechat_skipped:
                 print(f"  ⏭️ 公众号群发: 已跳过（今日已成功群发，幂等保护生效）", flush=True)
             elif wechat_ok:
                 print(f"  ✅ 公众号群发: 成功", flush=True)
@@ -551,6 +553,10 @@ def daily_push():
         print("\n📢 盘中模式，跳过公众号群发（仅盘后群发）", flush=True)
 
     # 摘要
+    notification_ok = admin_ok or beta_ok or wechat_ok or wechat_skipped
+    if not notification_ok:
+        raise RuntimeError("All notification channels failed")
+
     print(f"\n{'='*80}")
     print(f"OAMV择时: {'允许(牛市)' if oamv_status and oamv_status.get('can_open_position') else '禁止(熊市)'}")
     print(f"潜伏信号: {len(signals)}只")
@@ -579,7 +585,7 @@ if __name__ == "__main__":
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
-        def mock_send(title, desp, keys=None):
+        def mock_send(title, desp, keys=None, scheduled=None):
             print(f"\n[DRY-RUN] 标题: {title}")
             print(f"[DRY-RUN] 内容长度: {len(desp)}字")
             print("\n" + "=" * 80)
