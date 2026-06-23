@@ -65,6 +65,8 @@ BEST_PARAMS.update({
     "ambush_window": 10,  # 8→10（Task 4已验证最优）
     "quality_first_structure_enabled": True,
     "structure_require_micro_confirm": True,
+    "smart_money_structure_enabled": False,
+    "smart_money_min_score": 3,
     "eq_support_enabled": True,
     "industry_rs_top_pct": 0.20,
     # 子模式过滤（评分=3排除J0V1，评分=4排除J1V0C1M2）

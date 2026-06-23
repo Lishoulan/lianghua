@@ -119,6 +119,7 @@ def Detect_AmbushSignal_V61(df: pd.DataFrame, params: Dict[str, Any] = None) -> 
 
 class ExitReason(Enum):
     """退出枚举"""
+    BREAKEVEN_STOP = auto()      # 优先级0.5：保本止损
     ATR_HARD_STOP = auto()       # 优先级1：硬止损
     CHANDELIER_EXIT = auto()      # 优先级2：吊灯止盈
     BUY_CLIMAX = auto()          # 优先级3：Buy Climax
@@ -129,6 +130,7 @@ class ExitReason(Enum):
     @property
     def label(self):
         return {
+            ExitReason.BREAKEVEN_STOP: "保本止损",
             ExitReason.ATR_HARD_STOP: "硬止损",
             ExitReason.CHANDELIER_EXIT: "吊灯止盈",
             ExitReason.BUY_CLIMAX: "抢购高潮",

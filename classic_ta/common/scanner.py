@@ -159,6 +159,8 @@ def _extract_signal_info(ts_code, name, industry, df, best_params):
         "eq_vol_score": int(latest.get("eq_vol_score", 0)),
         "eq_candle_score": int(latest.get("eq_candle_score", 0)),
         "eq_ma_score": int(latest.get("eq_ma_score", 0)),
+        "smart_money_structure_score": int(latest.get("smart_money_structure_score", 0)),
+        "smart_money_structure_ok": bool(latest.get("smart_money_structure_ok", False)),
         "hard_stop": hard_stop,
         "chandelier_init": chandelier_init,
         "inst_support_score": int(latest.get("inst_support_score", 0)),

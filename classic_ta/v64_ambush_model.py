@@ -68,6 +68,18 @@ V64_PARAMS = V63_PARAMS.copy()
 V64_PARAMS.update({
     "quality_first_structure_enabled": True,
     "structure_require_micro_confirm": True,
+    "smart_money_structure_enabled": False,
+    "smart_money_lookback": 8,
+    "smart_money_min_score": 3,
+    "smart_money_up_min_return": 0.015,
+    "smart_money_up_min_volume_ratio": 1.10,
+    "smart_money_pullback_shrink_ratio": 0.90,
+    "smart_money_pullback_min_ratio": 0.60,
+    "smart_money_flow_ratio_min": 1.20,
+    "smart_money_near_high_pct": 0.97,
+    "smart_money_distribution_volume_ratio": 1.20,
+    "smart_money_distribution_drop_min": 0.005,
+    "smart_money_distribution_max_days": 0,
     # --- 入场质量评分（V6.4.8：盘面走势+量能+J值+黄白线）---
     "entry_quality_enabled": True,
     "entry_quality_min_score": 3,        # 最低入场质量分（0~8）
@@ -479,6 +491,90 @@ def add_inst_support_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Dat
     return df
 
 
+def add_smart_money_structure_indicators(df: pd.DataFrame, params: Dict = None) -> pd.DataFrame:
+    """Add smart-money style price/volume structure diagnostics.
+
+    This layer tries to encode:
+      1. up days should expand in both price and volume;
+      2. pullback days should contract in volume;
+      3. recent red-day impulse should dominate green-day pressure;
+      4. near local highs there should not be heavy-volume down days.
+    """
+    if params is None:
+        params = V64_PARAMS
+
+    lookback = params.get("smart_money_lookback", 8)
+    up_min_return = params.get("smart_money_up_min_return", 0.015)
+    up_min_vol_ratio = params.get("smart_money_up_min_volume_ratio", 1.10)
+    pullback_shrink_ratio = params.get("smart_money_pullback_shrink_ratio", 0.90)
+    pullback_min_ratio = params.get("smart_money_pullback_min_ratio", 0.60)
+    flow_ratio_min = params.get("smart_money_flow_ratio_min", 1.20)
+    near_high_pct = params.get("smart_money_near_high_pct", 0.97)
+    dist_vol_ratio = params.get("smart_money_distribution_volume_ratio", 1.20)
+    dist_drop_min = params.get("smart_money_distribution_drop_min", 0.005)
+    dist_max_days = params.get("smart_money_distribution_max_days", 0)
+
+    prev_close = df["Close"].shift(1)
+    prev_volume = df["Volume"].shift(1).replace(0, np.nan)
+    close_change = df["Close"].pct_change().fillna(0.0)
+
+    is_red_close = df["Close"] > prev_close
+    is_green_close = df["Close"] < prev_close
+    volume_ratio_prev = (df["Volume"] / prev_volume).replace([np.inf, -np.inf], np.nan)
+
+    strong_up_day = (
+        is_red_close
+        & (close_change >= up_min_return)
+        & (volume_ratio_prev >= up_min_vol_ratio)
+    )
+    strong_up_count = strong_up_day.rolling(lookback, min_periods=1).sum()
+    df["sm_strong_up"] = strong_up_count >= 1
+
+    pullback_day = is_green_close
+    pullback_shrink_day = pullback_day & (volume_ratio_prev <= pullback_shrink_ratio)
+    pullback_count = pullback_day.rolling(lookback, min_periods=1).sum()
+    pullback_shrink_count = pullback_shrink_day.rolling(lookback, min_periods=1).sum()
+    pullback_ratio = pullback_shrink_count / pullback_count.replace(0, np.nan)
+    df["sm_pullback_shrink"] = (pullback_count == 0) | (pullback_ratio >= pullback_min_ratio)
+
+    red_impulse = (
+        df["Volume"]
+        * close_change.clip(lower=0.0)
+        * is_red_close.astype(float)
+    )
+    green_pressure = (
+        df["Volume"]
+        * (-close_change.clip(upper=0.0))
+        * is_green_close.astype(float)
+    )
+    red_impulse_sum = red_impulse.rolling(lookback, min_periods=1).sum()
+    green_pressure_sum = green_pressure.rolling(lookback, min_periods=1).sum()
+    df["sm_red_green_dominance"] = red_impulse_sum >= green_pressure_sum * flow_ratio_min
+
+    rolling_high = df["Close"].rolling(lookback, min_periods=1).max()
+    near_high_zone = df["Close"] >= rolling_high * near_high_pct
+    distribution_day = (
+        near_high_zone
+        & is_green_close
+        & ((prev_close - df["Close"]) / prev_close.replace(0, np.nan) >= dist_drop_min)
+        & (volume_ratio_prev >= dist_vol_ratio)
+    )
+    distribution_count = distribution_day.rolling(lookback, min_periods=1).sum()
+    df["sm_no_distribution"] = distribution_count <= dist_max_days
+
+    df["smart_money_structure_score"] = (
+        df["sm_strong_up"].astype(int)
+        + df["sm_pullback_shrink"].astype(int)
+        + df["sm_red_green_dominance"].astype(int)
+        + df["sm_no_distribution"].astype(int)
+    )
+    df["smart_money_structure_ok"] = (
+        df["smart_money_structure_score"] >= params.get("smart_money_min_score", 3)
+    )
+
+    return df
+
+
 def _combine_micro_confirm(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
     conditions = []
 
@@ -519,6 +615,9 @@ def _build_quality_first_structure_signal(df: pd.DataFrame, params: Dict[str, An
     if params.get("structure_require_micro_confirm", True):
         structure_signal = structure_signal & df["micro_confirm"]
 
+    if params.get("smart_money_structure_enabled", False):
+        structure_signal = structure_signal & df["smart_money_structure_ok"]
+
     return structure_signal.fillna(False)
 
 
@@ -537,6 +636,9 @@ def Detect_AmbushSignal_V64(df: pd.DataFrame, params: Dict[str, Any] = None) -> 
     if "micro_confirm" not in df.columns:
         df = add_micro_confirm_indicators(df)
         df["micro_confirm"] = _combine_micro_confirm(df, params)
+
+    if params.get("smart_money_structure_enabled", False) and "smart_money_structure_ok" not in df.columns:
+        df = add_smart_money_structure_indicators(df, params)
 
     if params.get("quality_first_structure_enabled", True):
         df["ambush_structure_signal"] = _build_quality_first_structure_signal(df, params)

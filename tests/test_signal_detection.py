@@ -16,6 +16,7 @@ import pytest
 from classic_ta.v60_ambush_model import IndicatorCalcBase, Detect_AmbushSignal, DEFAULT_PARAMS
 from classic_ta.v64_ambush_model import (
     add_entry_quality_indicators,
+    add_smart_money_structure_indicators,
     Detect_AmbushSignal_V64,
     V64_PARAMS,
 )
@@ -280,3 +281,71 @@ class TestAddEntryQualityIndicators:
         df.iloc[-1, df.columns.get_loc("Volume")] = df["volume_ma"].iloc[-1] * 0.1
         result = add_entry_quality_indicators(df)
         assert result["eq_vol_score"].iloc[-1] == 2, "极低量应得2分"
+
+
+class TestSmartMoneyStructureIndicators:
+    """主力量价结构因子测试"""
+
+    def test_adds_expected_columns(self, basic_indicators_df):
+        """应输出主力量价结构相关诊断列"""
+        params = V64_PARAMS.copy()
+        params["smart_money_structure_enabled"] = True
+        result = add_smart_money_structure_indicators(basic_indicators_df, params)
+        for col in [
+            "sm_strong_up",
+            "sm_pullback_shrink",
+            "sm_red_green_dominance",
+            "sm_no_distribution",
+            "smart_money_structure_score",
+            "smart_money_structure_ok",
+        ]:
+            assert col in result.columns, f"缺少主力量价结构列: {col}"
+
+    def test_orderly_accumulation_scores_high(self):
+        """放量上涨、缩量回调、无顶部派发时应通过结构判定"""
+        dates = pd.bdate_range("2024-01-01", periods=10)
+        df = pd.DataFrame({
+            "Open": [10.0, 10.1, 10.6, 10.55, 10.85, 10.8, 11.05, 11.0, 11.35, 11.3],
+            "High": [10.2, 10.8, 10.7, 10.9, 11.0, 11.1, 11.2, 11.4, 11.5, 11.6],
+            "Low": [9.9, 10.0, 10.45, 10.5, 10.75, 10.7, 10.95, 10.95, 11.25, 11.2],
+            "Close": [10.0, 10.7, 10.5, 10.85, 10.8, 11.05, 11.0, 11.35, 11.3, 11.55],
+            "Volume": [100.0, 180.0, 120.0, 190.0, 130.0, 200.0, 135.0, 210.0, 140.0, 220.0],
+        }, index=dates)
+        df = IndicatorCalcBase(df)
+        params = V64_PARAMS.copy()
+        params.update({
+            "smart_money_structure_enabled": True,
+            "smart_money_lookback": 8,
+            "smart_money_min_score": 3,
+        })
+        result = add_smart_money_structure_indicators(df, params)
+        latest = result.iloc[-1]
+        assert bool(latest["sm_strong_up"])
+        assert bool(latest["sm_pullback_shrink"])
+        assert bool(latest["sm_red_green_dominance"])
+        assert bool(latest["sm_no_distribution"])
+        assert int(latest["smart_money_structure_score"]) >= 3
+        assert bool(latest["smart_money_structure_ok"])
+
+    def test_distribution_day_breaks_no_distribution_flag(self):
+        """顶部放量绿K应被识别为派发风险"""
+        dates = pd.bdate_range("2024-01-01", periods=8)
+        df = pd.DataFrame({
+            "Open": [10.0, 10.2, 10.5, 10.7, 10.9, 11.1, 11.3, 11.45],
+            "High": [10.3, 10.6, 10.8, 11.0, 11.2, 11.35, 11.5, 11.5],
+            "Low": [9.9, 10.1, 10.4, 10.6, 10.8, 11.0, 11.2, 11.0],
+            "Close": [10.2, 10.5, 10.7, 10.9, 11.1, 11.3, 11.45, 11.1],
+            "Volume": [100.0, 120.0, 140.0, 150.0, 160.0, 170.0, 180.0, 260.0],
+        }, index=dates)
+        df = IndicatorCalcBase(df)
+        params = V64_PARAMS.copy()
+        params.update({
+            "smart_money_structure_enabled": True,
+            "smart_money_lookback": 8,
+            "smart_money_near_high_pct": 0.96,
+            "smart_money_distribution_volume_ratio": 1.20,
+            "smart_money_distribution_drop_min": 0.01,
+        })
+        result = add_smart_money_structure_indicators(df, params)
+        latest = result.iloc[-1]
+        assert not bool(latest["sm_no_distribution"])
