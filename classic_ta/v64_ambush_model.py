@@ -66,6 +66,8 @@ from classic_ta.v63_ambush_model import (
 
 V64_PARAMS = V63_PARAMS.copy()
 V64_PARAMS.update({
+    "quality_first_structure_enabled": True,
+    "structure_require_micro_confirm": True,
     # --- 入场质量评分（V6.4.8：盘面走势+量能+J值+黄白线）---
     "entry_quality_enabled": True,
     "entry_quality_min_score": 3,        # 最低入场质量分（0~8）
@@ -92,6 +94,9 @@ V64_PARAMS.update({
     "eq_ma_enabled": True,
     "eq_ma_cross_lookback": 3,           # 金叉判断回看天数
     "eq_ma_converge_atr": 0.5,           # 白线接近黄线的ATR容差
+    "eq_support_enabled": True,
+    "eq_support_score_one": 2,
+    "eq_support_score_two": 3,
 
     # V6.4.9：趋势方向二级过滤（黄线上升 = 底部抬升）
     "eq_trend_dir_enabled": True,
@@ -239,10 +244,21 @@ def add_entry_quality_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Da
     else:
         df["eq_ma_score"] = 0
 
-    # 综合评分（E1-E4，0-8分）
+    if params.get("eq_support_enabled", True):
+        support_one = params.get("eq_support_score_one", 2)
+        support_two = params.get("eq_support_score_two", 3)
+        support_raw = df["inst_support_score"] if "inst_support_score" in df.columns else pd.Series(0, index=df.index)
+        df["eq_support_score"] = 0
+        df.loc[support_raw >= support_one, "eq_support_score"] = 1
+        df.loc[support_raw >= support_two, "eq_support_score"] = 2
+    else:
+        df["eq_support_score"] = 0
+
+    # 综合评分（E1-E5，0-8分）
     base_score = (
         df["eq_j_score"] + df["eq_vol_score"]
         + df["eq_candle_score"] + df["eq_ma_score"]
+        + df["eq_support_score"]
     )
 
     # E7: 多日确认评分（Persistent Near-Miss）
@@ -286,8 +302,8 @@ def add_entry_quality_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Da
     else:
         df["eq_persist_score"] = 0
 
-    # 最终综合评分（0-9分）
-    df["entry_quality_score"] = base_score + df["eq_persist_score"]
+    # Keep the familiar 0-8 range so downstream rules remain stable.
+    df["entry_quality_score"] = (base_score + df["eq_persist_score"]).clip(0, 8)
 
     # E5: 趋势方向（黄线是否上升 = 底部是否抬升）
     if params.get("eq_trend_dir_enabled", True):
@@ -463,6 +479,49 @@ def add_inst_support_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Dat
     return df
 
 
+def _combine_micro_confirm(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
+    conditions = []
+
+    if params.get("micro_vwap_above", True):
+        conditions.append(df["is_above_vwap"])
+    if params.get("micro_inside_bar", True):
+        conditions.append(df["is_inside_bar"])
+    if params.get("micro_vcp_shrink", True):
+        conditions.append(df["is_vcp_shrink"])
+    if params.get("micro_lower_wick", True):
+        conditions.append(df["is_lower_wick_support"])
+
+    if not conditions:
+        return pd.Series(True, index=df.index)
+
+    combined = conditions[0]
+    for condition in conditions[1:]:
+        if params.get("micro_confirm_mode", "any") == "all":
+            combined = combined & condition
+        else:
+            combined = combined | condition
+
+    return combined.fillna(False)
+
+
+def _build_quality_first_structure_signal(df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
+    window = params.get("ambush_window", 8)
+    support_atr = params.get("ambush_support_atr", 0.5)
+
+    if "tag_sos_anchor" in df.columns:
+        sos_in_window = df["tag_sos_anchor"].shift(1).rolling(window, min_periods=1).max().astype(bool)
+    else:
+        sos_in_window = pd.Series(True, index=df.index)
+
+    support_ok = df["Close"] > df["yellow_line"] - support_atr * df["atr14"]
+    structure_signal = sos_in_window & support_ok
+
+    if params.get("structure_require_micro_confirm", True):
+        structure_signal = structure_signal & df["micro_confirm"]
+
+    return structure_signal.fillna(False)
+
+
 def Detect_AmbushSignal_V64(df: pd.DataFrame, params: Dict[str, Any] = None) -> pd.DataFrame:
     """V6.4 潜伏信号引擎 —— V6.3 + 入场质量评分过滤
 
@@ -474,6 +533,14 @@ def Detect_AmbushSignal_V64(df: pd.DataFrame, params: Dict[str, Any] = None) -> 
 
     # 先跑V6.3信号（含微观确认）
     df = Detect_AmbushSignal_V63(df, params)
+
+    if "micro_confirm" not in df.columns:
+        df = add_micro_confirm_indicators(df)
+        df["micro_confirm"] = _combine_micro_confirm(df, params)
+
+    if params.get("quality_first_structure_enabled", True):
+        df["ambush_structure_signal"] = _build_quality_first_structure_signal(df, params)
+        df["ambush_signal"] = df["ambush_structure_signal"]
 
     # 入场质量评分过滤（V6.4.8）
     if params.get("entry_quality_enabled", False):

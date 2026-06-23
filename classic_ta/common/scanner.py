@@ -585,13 +585,14 @@ def apply_dynamic_score_filter(signals, oamv_status, dynamic_score_params):
         vr = s.get("vol_ratio", 1.0)
 
         # J值硬上限
-        if j >= dsp.get("j_hard_cap", 5):
+        j_hard_cap = dsp.get("j_hard_cap", 0)
+        if j_hard_cap and j_hard_cap > 0 and j >= j_hard_cap:
             continue
 
         if is_bull:
             if eq >= dsp.get("bull_min_score", 5):
                 filtered.append(s)
-            elif eq == 4 and j < dsp.get("bull_score4_j_max", 5) and vr < dsp.get("bull_score4_vol_ratio_max", 0.60):
+            elif dsp.get("allow_bull_score4_exception", False) and eq == 4 and j < dsp.get("bull_score4_j_max", 5) and vr < dsp.get("bull_score4_vol_ratio_max", 0.60):
                 filtered.append(s)
         else:
             if eq >= dsp.get("bear_min_score", 6):
