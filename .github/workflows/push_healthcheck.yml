@@ -1,0 +1,261 @@
+name: Push Healthcheck
+
+on:
+  schedule:
+    - cron: '45 6 * * 1-5'
+    - cron: '45 10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Slot to inspect: auto, intraday, or after_hours'
+        required: false
+        default: 'auto'
+
+permissions:
+  actions: read
+  issues: write
+
+jobs:
+  healthcheck:
+    name: Verify scheduled push output
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve slot and expectations
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_EXPR: ${{ github.event.schedule }}
+          INPUT_SLOT: ${{ github.event.inputs.slot }}
+        run: |
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            case "$SCHEDULE_EXPR" in
+              "45 6 * * 1-5")
+                SLOT="intraday"
+                ;;
+              "45 10 * * 1-5")
+                SLOT="after_hours"
+                ;;
+              *)
+                SLOT="unknown"
+                ;;
+            esac
+          else
+            SLOT="${INPUT_SLOT:-auto}"
+            if [ "$SLOT" = "auto" ]; then
+              UTC_HOUR=$(date -u +%H)
+              if [ "$UTC_HOUR" -lt 9 ]; then
+                SLOT="intraday"
+              else
+                SLOT="after_hours"
+              fi
+            fi
+          fi
+
+          if [ "$SLOT" = "intraday" ]; then
+            EXPECTED_SUCCESS_COUNT=1
+            SLOT_LABEL="intraday"
+          elif [ "$SLOT" = "after_hours" ]; then
+            EXPECTED_SUCCESS_COUNT=2
+            SLOT_LABEL="after-hours"
+          else
+            echo "Unsupported slot: $SLOT"
+            exit 1
+          fi
+
+          TODAY_BJT=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')
+          ARTIFACT_NAME="push-results-${TODAY_BJT}-${SLOT}"
+
+          echo "slot=$SLOT" >> "$GITHUB_OUTPUT"
+          echo "slot_label=$SLOT_LABEL" >> "$GITHUB_OUTPUT"
+          echo "today_bjt=$TODAY_BJT" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "expected_success_count=$EXPECTED_SUCCESS_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect artifact and workflow runs
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: ${{ steps.meta.outputs.artifact_name }}
+          TODAY_BJT: ${{ steps.meta.outputs.today_bjt }}
+          EXPECTED_SUCCESS_COUNT: ${{ steps.meta.outputs.expected_success_count }}
+        run: |
+          ARTIFACT_ID=$(
+            gh api repos/${{ github.repository }}/actions/artifacts --paginate \
+              --jq ".artifacts[] | select(.name == \"${ARTIFACT_NAME}\") | .id" \
+              | head -n 1 || true
+          )
+
+          SUCCESS_COUNT=$(
+            gh api repos/${{ github.repository }}/actions/workflows/daily_push.yml/runs \
+              -f event=schedule \
+              -f per_page=30 \
+              --jq "[.workflow_runs[] | select(.status == \"completed\" and .conclusion == \"success\" and (.created_at | startswith(\"${TODAY_BJT}\")))] | length"
+          )
+
+          HEALTHY="false"
+          REASON="artifact missing and not enough successful scheduled runs"
+          if [ -n "$ARTIFACT_ID" ]; then
+            HEALTHY="true"
+            REASON="artifact exists"
+          elif [ "${SUCCESS_COUNT}" -ge "${EXPECTED_SUCCESS_COUNT}" ]; then
+            HEALTHY="true"
+            REASON="scheduled success count threshold met"
+          fi
+
+          echo "artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "success_count=$SUCCESS_COUNT" >> "$GITHUB_OUTPUT"
+          echo "healthy=$HEALTHY" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+
+      - name: Close stale healthcheck alerts on recovery
+        if: steps.inspect.outputs.healthy == 'true'
+        uses: actions/github-script@v7
+        env:
+          SLOT_LABEL: ${{ steps.meta.outputs.slot_label }}
+          TODAY_BJT: ${{ steps.meta.outputs.today_bjt }}
+          REASON: ${{ steps.inspect.outputs.reason }}
+        with:
+          script: |
+            const slotLabel = process.env.SLOT_LABEL;
+            const today = process.env.TODAY_BJT;
+            const reason = process.env.REASON;
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'push-healthcheck,auto-alert',
+              per_page: 20,
+            });
+
+            for (const issue of issues.data) {
+              if (!issue.title.includes(today) || !issue.title.includes(slotLabel)) {
+                continue;
+              }
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Healthcheck recovered successfully. Closing this auto alert.\n\nReason: ${reason}`,
+              });
+
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+              });
+            }
+
+      - name: Create or update healthcheck alert issue
+        id: issue_alert
+        if: steps.inspect.outputs.healthy != 'true'
+        uses: actions/github-script@v7
+        env:
+          SLOT: ${{ steps.meta.outputs.slot }}
+          SLOT_LABEL: ${{ steps.meta.outputs.slot_label }}
+          TODAY_BJT: ${{ steps.meta.outputs.today_bjt }}
+          ARTIFACT_NAME: ${{ steps.meta.outputs.artifact_name }}
+          SUCCESS_COUNT: ${{ steps.inspect.outputs.success_count }}
+          EXPECTED_SUCCESS_COUNT: ${{ steps.meta.outputs.expected_success_count }}
+          REASON: ${{ steps.inspect.outputs.reason }}
+        with:
+          script: |
+            const slot = process.env.SLOT;
+            const slotLabel = process.env.SLOT_LABEL;
+            const today = process.env.TODAY_BJT;
+            const artifactName = process.env.ARTIFACT_NAME;
+            const successCount = process.env.SUCCESS_COUNT;
+            const expectedSuccessCount = process.env.EXPECTED_SUCCESS_COUNT;
+            const reason = process.env.REASON;
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `[Push Healthcheck] ${today} ${slotLabel}`;
+            const body = [
+              '## Scheduled push healthcheck alert',
+              '',
+              `- Date: ${today}`,
+              `- Slot: ${slotLabel} (${slot})`,
+              `- Expected artifact: ${artifactName}`,
+              `- Successful scheduled runs seen today: ${successCount}/${expectedSuccessCount}`,
+              `- Reason: ${reason}`,
+              `- Healthcheck run: ${runUrl}`,
+              '',
+              'Suggested checks:',
+              '1. Confirm the daily push workflow was triggered on schedule.',
+              '2. Review the latest Daily Push run logs and retry job outcome.',
+              '3. Verify the expected artifact was uploaded or manually rerun workflow_dispatch.',
+            ].join('\n');
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'push-healthcheck,auto-alert',
+              per_page: 20,
+            });
+
+            const existing = issues.data.find((issue) => issue.title === title);
+            let issueNumber;
+
+            if (existing) {
+              issueNumber = existing.number;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['push-healthcheck', 'auto-alert'],
+              });
+              issueNumber = created.data.number;
+            }
+
+            core.setOutput('issue_number', String(issueNumber));
+
+      - name: Send ServerChan alert
+        if: steps.inspect.outputs.healthy != 'true'
+        env:
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          SLOT_LABEL: ${{ steps.meta.outputs.slot_label }}
+          TODAY_BJT: ${{ steps.meta.outputs.today_bjt }}
+          ARTIFACT_NAME: ${{ steps.meta.outputs.artifact_name }}
+          SUCCESS_COUNT: ${{ steps.inspect.outputs.success_count }}
+          EXPECTED_SUCCESS_COUNT: ${{ steps.meta.outputs.expected_success_count }}
+          ISSUE_NUMBER: ${{ steps.issue_alert.outputs.issue_number }}
+        run: |
+          if [ -z "$SERVERCHAN_KEY" ]; then
+            echo "SERVERCHAN_KEY is empty, skip alert push."
+            exit 0
+          fi
+
+          TITLE="Push healthcheck alert | ${TODAY_BJT} ${SLOT_LABEL}"
+          BODY=$(cat <<EOF
+          ### Scheduled push healthcheck alert
+
+          - Date: ${TODAY_BJT}
+          - Slot: ${SLOT_LABEL}
+          - Expected artifact: ${ARTIFACT_NAME}
+          - Successful scheduled runs seen today: ${SUCCESS_COUNT}/${EXPECTED_SUCCESS_COUNT}
+          - Issue: https://github.com/${{ github.repository }}/issues/${ISSUE_NUMBER}
+          - Healthcheck run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+
+          IFS=',' read -ra KEYS <<< "$SERVERCHAN_KEY"
+          for key in "${KEYS[@]}"; do
+            key="$(echo "$key" | xargs)"
+            if [ -z "$key" ]; then
+              continue
+            fi
+
+            curl -fsS -X POST "https://sctapi.ftqq.com/${key}.send" \
+              --data-urlencode "title=${TITLE}" \
+              --data-urlencode "desp=${BODY}" >/dev/null || true
+          done
