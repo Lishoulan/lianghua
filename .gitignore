@@ -10,6 +10,10 @@ build/
 tradingagents_env/
 pip_libs/
 
+# Keep the bytecode-backed production entrypoints available in CI.
+!classic_ta/**/__pycache__/
+!classic_ta/**/__pycache__/*.cpython-314.pyc
+
 # ── 环境变量（不提交） ──
 .env
 .env.docker.local
