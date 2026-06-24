@@ -60,7 +60,10 @@ def _open_trade_days() -> list[str]:
     except Exception:
         pass
 
-    latest = get_latest_daily_bar_date_via_efinance("000001")
+    try:
+        latest = _latest_cached_date()
+    except Exception:
+        latest = get_latest_daily_bar_date_via_efinance("000001")
     cursor = now - timedelta(days=14)
     days: list[str] = []
     while cursor <= now:

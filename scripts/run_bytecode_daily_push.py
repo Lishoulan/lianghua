@@ -234,18 +234,29 @@ def refresh_reference_cache(reference_codes: list[str] | None = None) -> dict[st
 
     codes = reference_codes or ["000001.SZ", "600519.SH", "300750.SZ"]
     module = importlib.import_module("classic_ta.stock_data_duckdb")
-    fetch = getattr(module, "get_stock_data_cached", None)
-    if not callable(fetch):
-        raise RuntimeError("classic_ta.stock_data_duckdb does not expose a callable get_stock_data_cached()")
+    fetch_raw = getattr(module, "_fetch_raw_stock_data", None)
+    save_cache = getattr(module, "save_stock_cache", None)
+    if not callable(fetch_raw) or not callable(save_cache):
+        raise RuntimeError(
+            "classic_ta.stock_data_duckdb does not expose callable _fetch_raw_stock_data()/save_stock_cache()"
+        )
+
+    close_read_conns = getattr(module, "close_thread_local_conns", None)
+    if callable(close_read_conns):
+        close_read_conns()
 
     updated = 0
     latest = ""
     for ts_code in codes:
         try:
-            df = fetch(ts_code, min_rows=1)
+            df = fetch_raw(ts_code, start_date="20200101")
         except Exception:
             continue
         if df is None or len(df) == 0:
+            continue
+        try:
+            save_cache(ts_code, df)
+        except Exception:
             continue
         updated += 1
         latest = max(latest, df.index[-1].strftime("%Y%m%d"))
