@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.check_data_freshness import ensure_freshness
-from scripts.run_bytecode_daily_push import run_daily_push, run_prewarm
+from scripts.run_bytecode_daily_push import refresh_reference_cache, run_daily_push, run_prewarm
 
 
 def main() -> None:
@@ -28,6 +28,9 @@ def main() -> None:
         try:
             print("[pipeline] prewarm latest data")
             run_prewarm()
+
+            print("[pipeline] refresh reference cache")
+            refresh_reference_cache()
 
             expected, latest = ensure_freshness(args.mode)
             print(f"[pipeline] freshness_ok latest={latest} expected={expected}")

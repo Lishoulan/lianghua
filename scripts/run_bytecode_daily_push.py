@@ -226,6 +226,37 @@ def run_prewarm() -> None:
     safe_prewarm_data()
 
 
+def refresh_reference_cache(reference_codes: list[str] | None = None) -> dict[str, str | int]:
+    _load_env_file(ENV_FILE)
+    _disable_broken_dotenv()
+    _install_import_hook()
+    _install_source_fallbacks()
+
+    codes = reference_codes or ["000001.SZ", "600519.SH", "300750.SZ"]
+    module = importlib.import_module("classic_ta.stock_data_duckdb")
+    fetch = getattr(module, "get_stock_data_cached", None)
+    if not callable(fetch):
+        raise RuntimeError("classic_ta.stock_data_duckdb does not expose a callable get_stock_data_cached()")
+
+    updated = 0
+    latest = ""
+    for ts_code in codes:
+        try:
+            df = fetch(ts_code, min_rows=1)
+        except Exception:
+            continue
+        if df is None or len(df) == 0:
+            continue
+        updated += 1
+        latest = max(latest, df.index[-1].strftime("%Y%m%d"))
+
+    if updated == 0:
+        raise RuntimeError("reference cache refresh failed for all probe symbols")
+
+    print(f"[cache-refresh] updated {updated}/{len(codes)} probe symbols; latest={latest}", flush=True)
+    return {"updated": updated, "latest": latest}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the bytecode-backed daily_push entrypoint.")
     parser.add_argument("--prewarm-only", action="store_true")
