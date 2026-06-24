@@ -73,6 +73,7 @@ v64_live_backtest.py
 v64_optimized_backtest.py
 
 # ── 工具缓存 ──
+!scripts/check_data_freshness.py
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
