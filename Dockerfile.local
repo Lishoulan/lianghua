@@ -1,0 +1,28 @@
+FROM python:3.14-slim
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DOCKER_ENV_FILE=/app/.env.docker.local
+
+RUN apt-get update -o Acquire::Retries=5 && apt-get install -y --no-install-recommends \
+    cron \
+    curl \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+
+RUN mkdir -p /app/results /app/logs
+RUN chmod +x /app/scripts/start_local_cron.sh
+
+CMD ["/app/scripts/start_local_cron.sh"]

@@ -1,0 +1,124 @@
+name: Daily Push Latest
+
+on:
+  schedule:
+    - cron: "15 5 * * 1-5"
+    - cron: "30 5 * * 1-5"
+    - cron: "50 5 * * 1-5"
+    - cron: "15 9 * * 1-5"
+    - cron: "30 9 * * 1-5"
+    - cron: "50 9 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Scan mode"
+        required: true
+        default: "after_hours"
+        type: choice
+        options:
+          - intraday
+          - after_hours
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-push-latest-${{ github.ref }}-${{ github.event.schedule || inputs.mode || 'manual' }}
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Restore results cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            results
+            logs
+          key: tradingagents-results-v1-${{ github.run_id }}
+          restore-keys: |
+            tradingagents-results-v1-
+
+      - name: Prepare directories
+        shell: bash
+        run: mkdir -p results logs
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate bytecode entrypoint
+        shell: bash
+        run: |
+          test -f classic_ta/__pycache__/daily_push.cpython-314.pyc
+          test -f classic_ta/__pycache__/stock_data_duckdb.cpython-314.pyc
+
+      - name: Determine scan mode
+        id: mode
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ inputs.mode }}"
+          else
+            case "${{ github.event.schedule }}" in
+              "15 5 * * 1-5"|"30 5 * * 1-5"|"50 5 * * 1-5")
+                MODE="intraday"
+                ;;
+              *)
+                MODE="after_hours"
+                ;;
+            esac
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Selected mode=$MODE"
+
+      - name: Run latest-data scan pipeline
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+          SERVERCHAN_KEY_BETA: ${{ secrets.SERVERCHAN_KEY_BETA }}
+          WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
+          WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
+          WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
+          WECHAT_ENCODING_AES_KEY: ${{ secrets.WECHAT_ENCODING_AES_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PUSH_API_KEY: ${{ secrets.PUSH_API_KEY }}
+        shell: bash
+        run: |
+          python -u scripts/run_scan_pipeline.py \
+            --mode "${{ steps.mode.outputs.mode }}" \
+            --retries 3 \
+            --base-sleep 20
+
+      - name: Save results cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            results
+            logs
+          key: tradingagents-results-v1-${{ github.run_id }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-push-${{ steps.mode.outputs.mode }}-${{ github.run_id }}
+          path: |
+            logs
+            results/daily
+          retention-days: 14

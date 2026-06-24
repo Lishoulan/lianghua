@@ -1,0 +1,17 @@
+services:
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    container_name: tradingagents-local-scanner
+    restart: unless-stopped
+    env_file:
+      - .env.docker.local
+    environment:
+      TZ: Asia/Shanghai
+      RUN_MODE: cron
+      DOCKER_ENV_FILE: /app/.env.docker.local
+    volumes:
+      - ./results:/app/results
+      - ./logs:/app/logs
+      - ./.env.docker.local:/app/.env.docker.local:ro
