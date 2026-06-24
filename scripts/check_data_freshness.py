@@ -60,12 +60,15 @@ def _open_trade_days() -> list[str]:
     except Exception:
         pass
 
-    index_df = pro.index_daily(ts_code="000001.SH", start_date=start, end_date=end)
-    if index_df is not None and len(index_df) > 0:
-        return sorted(index_df["trade_date"].astype(str).unique().tolist())
-
     latest = get_latest_daily_bar_date_via_efinance("000001")
-    return [latest]
+    cursor = now - timedelta(days=14)
+    days: list[str] = []
+    while cursor <= now:
+        if cursor.weekday() < 5:
+            days.append(cursor.strftime("%Y%m%d"))
+        cursor += timedelta(days=1)
+    days.append(latest)
+    return sorted(set(days))
 
 
 def _expected_cache_date(mode: str) -> str:
@@ -101,6 +104,14 @@ def _check_intraday_provider() -> None:
     errors: list[str] = []
 
     try:
+        quotes = get_efinance_realtime_quotes()
+        if quotes is not None and len(quotes) >= 1000:
+            return
+        errors.append("efinance returned too few rows")
+    except Exception as exc:
+        errors.append(f"efinance: {exc}")
+
+    try:
         import akshare as ak
 
         quotes = ak.stock_zh_a_spot_em()
@@ -109,14 +120,6 @@ def _check_intraday_provider() -> None:
         errors.append("akshare returned too few rows")
     except Exception as exc:
         errors.append(f"akshare: {exc}")
-
-    try:
-        quotes = get_efinance_realtime_quotes()
-        if quotes is not None and len(quotes) >= 1000:
-            return
-        errors.append("efinance returned too few rows")
-    except Exception as exc:
-        errors.append(f"efinance: {exc}")
 
     raise RuntimeError("No free intraday quote provider is healthy: " + " | ".join(errors))
 
@@ -159,8 +162,11 @@ def ensure_freshness(mode: str) -> tuple[str, str]:
     if latest < expected:
         raise RuntimeError(f"Cache freshness check failed for {mode}: latest={latest}, expected>={expected}")
 
+    now = datetime.now(_BJT)
+
     if mode == "intraday":
-        _check_intraday_provider()
+        if 9 <= now.hour < 15:
+            _check_intraday_provider()
     else:
         _check_after_hours_provider(expected)
 

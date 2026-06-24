@@ -54,6 +54,15 @@ jobs:
         shell: bash
         run: mkdir -p results logs
 
+      - name: Bootstrap cache seed
+        shell: bash
+        run: |
+          if [ ! -s results/stock_cache.duckdb ]; then
+            python -u scripts/bootstrap_cache_seed.py
+          else
+            echo "DuckDB cache already present, skip seed bootstrap."
+          fi
+
       - name: Install dependencies
         shell: bash
         run: |
@@ -105,7 +114,7 @@ jobs:
             --base-sleep 20
 
       - name: Save results cache
-        if: always()
+        if: always() && hashFiles('results/stock_cache.duckdb') != ''
         uses: actions/cache/save@v4
         with:
           path: |
