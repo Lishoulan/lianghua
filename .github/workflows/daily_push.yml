@@ -164,9 +164,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Run Daily Push in Docker
-        timeout-minutes: 25
+        timeout-minutes: 28
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          TIME_SLOT: ${{ needs.check-duplicate.outputs.time_slot }}
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           SERVERCHAN_KEY_BETA: ${{ secrets.SERVERCHAN_KEY_BETA }}
@@ -178,9 +179,13 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           PUSH_API_KEY: ${{ secrets.PUSH_API_KEY }}
         run: |
-          CMD="python -u classic_ta/daily_push.py"
+          # 走 run_scan_pipeline.py 统一编排：
+          #   fetch_today_bars (批量更新当日全市场) → prewarm → freshness → daily_push
+          # 主推送阶段：10 次重试 × 60s 间隔（约 10 分钟窗口）
+          CMD="python -u scripts/run_scan_pipeline.py --mode ${TIME_SLOT} --retries 10 --base-sleep 60"
           if [ "$DRY_RUN" = "true" ]; then
-            CMD="python classic_ta/daily_push.py --dry-run"
+            CMD="python -u scripts/run_scan_pipeline.py --mode ${TIME_SLOT} --retries 2 --base-sleep 10"
+            export DRY_RUN=1
           fi
 
           docker run --rm --name daily-push \
@@ -194,6 +199,7 @@ jobs:
             -e SUPABASE_URL \
             -e SUPABASE_KEY \
             -e PUSH_API_KEY \
+            -e DRY_RUN \
             -v "$GITHUB_WORKSPACE/results:/app/results" \
             -v "$GITHUB_WORKSPACE/logs:/app/logs" \
             tradingagents:daily-push \
