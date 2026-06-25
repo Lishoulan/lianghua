@@ -324,6 +324,7 @@ TradingAgents/
 6. 盘中: 获取akshare实时行情
 7. 全市场扫描 (SyncScanner, 10线程, 15min超时)
 8. 行业热度分析 + 行业过滤
+8.5 个股动量过滤（甜蜜点: 10日跌幅<3%，评分加分+硬过滤）
 9. 精细动态评分过滤 (apply_dynamic_score_filter)
 10. 构建消息 → Server酱推送(定时投递) → 盘后: 公众号群发
 ```
@@ -391,7 +392,7 @@ DYNAMIC_SCORE_PARAMS = {
 | 函数 | 签名 | 说明 |
 |------|------|------|
 | `get_all_a_stocks` | `() -> list[(ts_code, name, industry)]` | 全A股列表（排除ST/北交所/N开头） |
-| `batch_prefilter_stocks` | `() -> DataFrame or None` | akshare批量预筛选（涨跌幅<5%, 价格3~100, 换手>=0.5%） |
+| `batch_prefilter_stocks` | `() -> DataFrame or None` | akshare批量预筛选（仅排除ST/北交所/退市/低价股） |
 | `get_realtime_quotes` | `() -> dict{ts_code: quote}` | 全市场实时行情 |
 | `append_realtime_bar` | `(df, quote) -> DataFrame` | 盘中拼接实时K线 |
 
@@ -416,8 +417,14 @@ DYNAMIC_SCORE_PARAMS = {
 | 函数 | 签名 | 说明 |
 |------|------|------|
 | `compute_industry_analysis` | `(signals_data, industry_map, params) -> list[dict]` | 行业动量排名+冷热分布+轮动信号 |
+| `compute_industry_lag_signals` | `(signals, mom_df, params) -> list` | 个股动量过滤（甜蜜点: stock>-5%） |
 
-返回每项: `{name, momentum, momentum_change, rotation(轮入/轮出/加速/减速/回暖/恶化), signal_count, hot_cold}`
+返回每项: `{name, momentum, momentum_change, rotation, signal_count, hot_cold}`
+
+**个股动量过滤（甜蜜点 stock > -3%）：**
+- 个股10日收益 > -3% → 动量达标，评分+1分
+- 个股10日收益 <= -3% → 动量不达标，硬过滤移除
+- 回测: 年31笔, 胜率57%, 均收益+8.21%, 大亏45笔(比-5%阈值少36%)
 
 #### 4.2.6 push_channels.py — Server酱推送通道
 

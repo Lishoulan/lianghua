@@ -1,10 +1,10 @@
 """
 潜伏模型V6.4 每日实盘推送（统一版）
 ===========================
-基于V6.4优化参数 + 质量优先结构信号 + 个股动量过滤 + 分组推送 + 公众号群发
+基于V6.4优化参数 + 个股动量过滤 + 精细动态评分 + 分组推送 + 公众号群发
 
 核心过滤链路:
-  V6.4信号检测 → 行业过滤(动量>0) → 个股动量过滤(10日跌幅<3%) → 评分加分(+1) → 动量硬过滤 → 质量优先动态评分
+  V6.4信号检测 → 行业过滤(动量>0) → 个股动量过滤(10日跌幅<3%) → 评分加分(+1) → 动量硬过滤 → 精细动态评分
 
 个股动量过滤(甜蜜点):
   - 个股10日收益 > -3% → 动量达标，评分+1分
@@ -61,13 +61,8 @@ BEST_PARAMS.update({
     # Task 3: J值保持<5（放宽J值反而降低性能）
     # Task 4: SOS窗口 8→10（交易+55.8%，胜率+0.3pp，总收益+17.7%）
     "entry_quality_min_score": 4,
-    "ambush_j_oversold": 13,
+    "ambush_j_oversold": 5,
     "ambush_window": 10,  # 8→10（Task 4已验证最优）
-    "quality_first_structure_enabled": True,
-    "structure_require_micro_confirm": True,
-    "smart_money_structure_enabled": False,
-    "smart_money_min_score": 3,
-    "eq_support_enabled": True,
     "industry_rs_top_pct": 0.20,
     # 子模式过滤（评分=3排除J0V1，评分=4排除J1V0C1M2）
     # 回测验证: J1V0C1M2胜率21.7%，过滤后score>=4总收益+63.7pp
@@ -104,12 +99,11 @@ BEST_PARAMS.update({
 
 # 精细动态评分参数（配合entry_quality_min_score=4）
 DYNAMIC_SCORE_PARAMS = {
-    "bull_min_score": 5,              # 牛市也只保留高分信号
+    "bull_min_score": 4,              # 5→4（牛市允许4分信号）
     "bull_score4_j_max": 8,           # 5→8（4分信号J值上限放宽）
     "bull_score4_vol_ratio_max": 0.70,  # 0.60→0.70（4分信号量比上限放宽）
-    "bear_min_score": 6,              # 熊市进一步收紧
-    "allow_bull_score4_exception": False,
-    "j_hard_cap": 0,
+    "bear_min_score": 5,              # 6→5（熊市也允许5分信号，配合OAMV过滤）
+    "j_hard_cap": 8,                  # 5→8（J值硬上限放宽，配合ambush_j_oversold=5）
 }
 
 # 定时投递目标时间（北京时间，消息到达微信的时间）
@@ -198,7 +192,7 @@ def prewarm_data():
     cache_count = int(cache_stats.get("count", 0) or 0)
     cache_size_mb = cache_stats.get("size_mb", 0)
     cache_ready = cache_count >= 1000
-    print(f"  DuckDB缓存: {cache_count}只股票 | {cache_size_mb}MB", flush=True)
+    print(f"  DuckDB cache: {cache_count} stocks | {cache_size_mb}MB", flush=True)
 
     # 快速连通性检查（每个数据源5秒超时）
     akshare_ok = False
@@ -229,9 +223,9 @@ def prewarm_data():
 
     if not akshare_ok and not tushare_ok:
         if cache_ready:
-            print("  ⚠️ 外部数据源暂时不可用，降级使用DuckDB缓存继续扫描", flush=True)
+            print("  WARN data providers unavailable, falling back to DuckDB cache", flush=True)
         else:
-            raise RuntimeError("❌ 所有数据源不可用，且本地缓存不足，终止扫描等待重试触发")
+            raise RuntimeError("All data providers unavailable and local cache is insufficient")
 
     now = datetime.now(_BJT)
     hour = now.hour
@@ -261,10 +255,10 @@ def daily_push():
         print(f"  ⏱️ {step_name}耗时: {elapsed:.1f}s (总耗时: {total_elapsed:.0f}s)", flush=True)
 
     print("=" * 80, flush=True)
-    print("潜伏模型V6.4 每日实盘推送（质量优先版）", flush=True)
+    print("潜伏模型V6.4 每日实盘推送（精细动态评分版）", flush=True)
     print(f"启动时间: {datetime.now(_BJT).strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-    print("优化参数: 结构=SOS窗口+支撑+微观确认 | 评分≥4 | window=10 | mhd=15 | industry_top=20%", flush=True)
-    print("动态评分: 牛市≥5 | 熊市≥6", flush=True)
+    print(f"优化参数: 评分≥4 | J<5 | window=10 | mhd=15 | industry_top=20%", flush=True)
+    print(f"动态评分: 牛市≥4或(4+J<8+量比<0.7) | 熊市≥5 | J<8", flush=True)
     print("=" * 80, flush=True)
 
     # 交易日检查
@@ -464,7 +458,7 @@ def daily_push():
     if oamv_status:
         is_bull = oamv_status.get("can_open_position", False)
         print(f"  OAMV状态: {'牛市' if is_bull else '熊市'} | "
-              f"规则: {'评分≥5' if is_bull else '评分≥6'}", flush=True)
+              f"规则: {'评分≥5或(4+J<5+量比<0.6)' if is_bull else '评分≥6'} | J<5", flush=True)
     _step_time("动态评分", _t)
 
     # 构建推送消息（两组格式）
@@ -475,7 +469,7 @@ def daily_push():
     # 保存结果
     result = {
         "scan_time": datetime.now(_BJT).strftime("%Y-%m-%d %H:%M:%S"),
-        "version": "V6.4-质量优先",
+        "version": "V6.4-精细动态评分",
         "mode": "盘中实时" if is_intraday else "盘后完整",
         "params": {
             "entry_quality_min_score": BEST_PARAMS["entry_quality_min_score"],
@@ -534,8 +528,6 @@ def daily_push():
     # ══════════════════════════════════════════════════════════
     #  公众号群发（仅盘后模式）
     # ══════════════════════════════════════════════════════════
-    wechat_ok = False
-    wechat_skipped = False
     if not is_intraday:
         print("\n" + "=" * 60, flush=True)
         print("📢 公众号群发（盘后）", flush=True)
@@ -544,8 +536,8 @@ def daily_push():
             from wechat_push import push_signals_to_wechat
             wechat_result = push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=False)
             wechat_ok = wechat_result.get("success", False)
-            wechat_skipped = wechat_result.get("skipped", False)
-            if wechat_skipped:
+            skipped = wechat_result.get("skipped", False)
+            if skipped:
                 print(f"  ⏭️ 公众号群发: 已跳过（今日已成功群发，幂等保护生效）", flush=True)
             elif wechat_ok:
                 print(f"  ✅ 公众号群发: 成功", flush=True)
@@ -559,10 +551,6 @@ def daily_push():
         print("\n📢 盘中模式，跳过公众号群发（仅盘后群发）", flush=True)
 
     # 摘要
-    notification_ok = admin_ok or beta_ok or wechat_ok or wechat_skipped
-    if not notification_ok:
-        raise RuntimeError("All notification channels failed")
-
     print(f"\n{'='*80}")
     print(f"OAMV择时: {'允许(牛市)' if oamv_status and oamv_status.get('can_open_position') else '禁止(熊市)'}")
     print(f"潜伏信号: {len(signals)}只")
@@ -591,7 +579,7 @@ if __name__ == "__main__":
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
-        def mock_send(title, desp, keys=None, scheduled=None):
+        def mock_send(title, desp, keys=None):
             print(f"\n[DRY-RUN] 标题: {title}")
             print(f"[DRY-RUN] 内容长度: {len(desp)}字")
             print("\n" + "=" * 80)

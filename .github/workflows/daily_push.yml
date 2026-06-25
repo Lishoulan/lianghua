@@ -15,6 +15,11 @@ on:
         required: false
         default: 'false'
 
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
 concurrency:
   group: daily-push
   cancel-in-progress: false
@@ -58,13 +63,13 @@ jobs:
               SLOT="unknown"
             fi
           fi
+
           echo "time_slot=$SLOT" >> "$GITHUB_OUTPUT"
 
           TODAY=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')
           ARTIFACT_NAME="push-results-${TODAY}-${SLOT}"
-
           ARTIFACTS=$(
-            gh api repos/${{ github.repository }}/actions/artifacts \
+            gh api "repos/${{ github.repository }}/actions/artifacts" \
               --jq ".artifacts[] | select(.name == \"${ARTIFACT_NAME}\") | .id" \
               2>/dev/null || true
           )
@@ -82,7 +87,7 @@ jobs:
     needs: check-duplicate
     if: needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -117,11 +122,8 @@ jobs:
           fi
           echo "delay_minutes=$DELAY_MIN" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
+      - name: Prepare workspace directories
+        run: mkdir -p results/daily results/oamv_cache logs
 
       - name: Get current Beijing date
         id: date
@@ -142,47 +144,60 @@ jobs:
           path: |
             results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v5-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
+          key: stock-cache-v6-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
           restore-keys: |
+            stock-cache-v6-${{ runner.os }}-
             stock-cache-v5-${{ runner.os }}-
-            stock-cache-v4-${{ runner.os }}
             stock-cache-v4-${{ runner.os }}-
 
-      - name: Install dependencies
-        timeout-minutes: 5
-        run: pip install --default-timeout=60 --retries=3 -r requirements.txt
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Pre-warm data cache
-        continue-on-error: true
-        timeout-minutes: 2
-        env:
-          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-        run: |
-          python -c "
-          import sys; sys.path.insert(0,'.')
-          from classic_ta.stock_data_duckdb import get_cache_stats
-          stats = get_cache_stats()
-          print(f'Cache status: {stats.get(\"count\", 0)} stocks, {stats.get(\"size_mb\", 0)}MB')
-          "
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: tradingagents:daily-push
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Run Daily Push
+      - name: Run Daily Push in Docker
         timeout-minutes: 25
         env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           SERVERCHAN_KEY_BETA: ${{ secrets.SERVERCHAN_KEY_BETA }}
           WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
           WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
           WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
+          WECHAT_ENCODING_AES_KEY: ${{ secrets.WECHAT_ENCODING_AES_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          PYTHONUNBUFFERED: '1'
+          PUSH_API_KEY: ${{ secrets.PUSH_API_KEY }}
         run: |
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            python classic_ta/daily_push.py --dry-run
-          else
-            python -u classic_ta/daily_push.py
+          CMD="python -u classic_ta/daily_push.py"
+          if [ "$DRY_RUN" = "true" ]; then
+            CMD="python classic_ta/daily_push.py --dry-run"
           fi
+
+          docker run --rm --name daily-push \
+            -e TUSHARE_TOKEN \
+            -e SERVERCHAN_KEY \
+            -e SERVERCHAN_KEY_BETA \
+            -e WECHAT_APP_ID \
+            -e WECHAT_APP_SECRET \
+            -e WECHAT_TOKEN \
+            -e WECHAT_ENCODING_AES_KEY \
+            -e SUPABASE_URL \
+            -e SUPABASE_KEY \
+            -e PUSH_API_KEY \
+            -v "$GITHUB_WORKSPACE/results:/app/results" \
+            -v "$GITHUB_WORKSPACE/logs:/app/logs" \
+            tradingagents:daily-push \
+            /bin/sh -lc "$CMD"
 
       - name: Upload results
         if: always()
@@ -197,15 +212,12 @@ jobs:
     needs: [check-duplicate, daily-push]
     if: (failure() || cancelled()) && needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
+      - name: Prepare workspace directories
+        run: mkdir -p results/daily results/oamv_cache logs
 
       - name: Get current Beijing date
         id: date
@@ -226,18 +238,27 @@ jobs:
           path: |
             results/stock_cache.duckdb
             results/oamv_cache
-          key: stock-cache-v5-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
+          key: stock-cache-v6-${{ runner.os }}-${{ steps.cache_meta.outputs.cache_suffix }}
           restore-keys: |
+            stock-cache-v6-${{ runner.os }}-
             stock-cache-v5-${{ runner.os }}-
-            stock-cache-v4-${{ runner.os }}
             stock-cache-v4-${{ runner.os }}-
 
-      - name: Install dependencies
-        timeout-minutes: 5
-        run: pip install --default-timeout=60 --retries=3 -r requirements.txt
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Retry Daily Push
-        timeout-minutes: 20
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: tradingagents:daily-push
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Retry Daily Push in Docker
+        timeout-minutes: 25
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
@@ -245,13 +266,29 @@ jobs:
           WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
           WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
           WECHAT_TOKEN: ${{ secrets.WECHAT_TOKEN }}
+          WECHAT_ENCODING_AES_KEY: ${{ secrets.WECHAT_ENCODING_AES_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          PYTHONUNBUFFERED: '1'
+          PUSH_API_KEY: ${{ secrets.PUSH_API_KEY }}
         run: |
           echo "=== Retry push after failure ==="
           echo "Retry time (Beijing): $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
-          python -u classic_ta/daily_push.py
+
+          docker run --rm --name daily-push-retry \
+            -e TUSHARE_TOKEN \
+            -e SERVERCHAN_KEY \
+            -e SERVERCHAN_KEY_BETA \
+            -e WECHAT_APP_ID \
+            -e WECHAT_APP_SECRET \
+            -e WECHAT_TOKEN \
+            -e WECHAT_ENCODING_AES_KEY \
+            -e SUPABASE_URL \
+            -e SUPABASE_KEY \
+            -e PUSH_API_KEY \
+            -v "$GITHUB_WORKSPACE/results:/app/results" \
+            -v "$GITHUB_WORKSPACE/logs:/app/logs" \
+            tradingagents:daily-push \
+            python -u classic_ta/daily_push.py
 
       - name: Upload retry results
         if: success()
@@ -266,8 +303,6 @@ jobs:
     needs: [check-duplicate, daily-push, retry-push]
     if: (failure() || cancelled()) && needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      issues: write
     steps:
       - name: Create failure alert issue
         uses: actions/github-script@v7
@@ -282,7 +317,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
-              labels: ['push-failure', 'auto-alert'],
+              labels: 'push-failure,auto-alert',
               per_page: 50,
             });
 
@@ -299,8 +334,8 @@ jobs:
               '',
               'Suggested checks:',
               '1. Review the workflow logs for the exact exception.',
-              '2. Verify TUSHARE_TOKEN, SERVERCHAN_KEY, and related secrets.',
-              '3. Confirm data providers such as akshare, tushare, and mootdx are reachable.',
+              '2. Verify required GitHub Secrets such as TUSHARE_TOKEN and SERVERCHAN_KEY.',
+              '3. Confirm the Docker image built successfully and the container could start.',
               '4. If this looks transient, trigger workflow_dispatch to retry manually.',
             ].join('\n');
 
@@ -326,8 +361,6 @@ jobs:
     needs: [check-duplicate, daily-push]
     if: success() && needs.check-duplicate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      issues: write
     steps:
       - uses: actions/github-script@v7
         with:
@@ -336,7 +369,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
-              labels: ['push-failure', 'auto-alert'],
+              labels: 'push-failure,auto-alert',
               per_page: 20,
             });
 
