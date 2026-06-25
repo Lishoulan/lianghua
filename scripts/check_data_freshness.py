@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -51,6 +52,8 @@ def _open_trade_days() -> list[str]:
     now = datetime.now(_BJT).date()
     start = (now - timedelta(days=14)).strftime("%Y%m%d")
     end = now.strftime("%Y%m%d")
+
+    # 优先用 trade_cal（1次/分钟配额）
     try:
         cal = pro.trade_cal(exchange="SSE", start_date=start, end_date=end)
         cal = cal[cal["is_open"] == 1]
@@ -60,6 +63,24 @@ def _open_trade_days() -> list[str]:
     except Exception:
         pass
 
+    # Fallback 1: 用 pro.daily(trade_date=today) 探测今日是否开盘
+    today_str = now.strftime("%Y%m%d")
+    try:
+        time.sleep(0.35)
+        df_today = pro.daily(trade_date=today_str)
+        if df_today is not None and len(df_today) > 0:
+            # 今日有数据，用最近工作日构造交易日历
+            cursor = now - timedelta(days=14)
+            days: list[str] = []
+            while cursor <= now:
+                if cursor.weekday() < 5:
+                    days.append(cursor.strftime("%Y%m%d"))
+                cursor += timedelta(days=1)
+            return sorted(set(days))
+    except Exception:
+        pass
+
+    # Fallback 2: 用缓存最新日期
     try:
         latest = _latest_cached_date()
     except Exception:

@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.check_data_freshness import ensure_freshness
+from scripts.fetch_today_bars import fetch_today_bars
 from scripts.run_bytecode_daily_push import refresh_reference_cache, run_daily_push, run_prewarm
 
 
@@ -27,15 +28,24 @@ def main() -> None:
     for attempt in range(1, args.retries + 1):
         print(f"[pipeline] attempt {attempt}/{args.retries} mode={current_mode}")
         try:
+            # 1. 拉取当日全市场日线（1次 tushare 调用，绕过逐股配额限制）
+            print("[pipeline] fetch today bars (batch)")
+            fetch_result = fetch_today_bars()
+            print(f"[pipeline] fetch_today_bars: {fetch_result}")
+
+            # 2. 数据源健康预检
             print("[pipeline] prewarm latest data")
             run_prewarm()
 
+            # 3. 探针股票刷新
             print("[pipeline] refresh reference cache")
             refresh_reference_cache()
 
+            # 4. 新鲜度校验
             expected, latest = ensure_freshness(current_mode)
             print(f"[pipeline] freshness_ok latest={latest} expected={expected}")
 
+            # 5. 执行推送
             print("[pipeline] run daily push")
             run_daily_push()
             print("[pipeline] success")
