@@ -258,8 +258,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Retry Daily Push in Docker
-        timeout-minutes: 25
+        timeout-minutes: 28
         env:
+          TIME_SLOT: ${{ needs.check-duplicate.outputs.time_slot }}
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
           SERVERCHAN_KEY_BETA: ${{ secrets.SERVERCHAN_KEY_BETA }}
@@ -273,6 +274,10 @@ jobs:
         run: |
           echo "=== Retry push after failure ==="
           echo "Retry time (Beijing): $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+
+          # 复用 run_scan_pipeline.py 新鲜度保障 + 降级兜底
+          # 重试阶段更激进：5 次重试 × 30s 间隔
+          CMD="python -u scripts/run_scan_pipeline.py --mode ${TIME_SLOT} --retries 5 --base-sleep 30"
 
           docker run --rm --name daily-push-retry \
             -e TUSHARE_TOKEN \
@@ -288,7 +293,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/results:/app/results" \
             -v "$GITHUB_WORKSPACE/logs:/app/logs" \
             tradingagents:daily-push \
-            python -u classic_ta/daily_push.py
+            /bin/sh -lc "$CMD"
 
       - name: Upload retry results
         if: success()
