@@ -1,13 +1,9 @@
 name: Daily Push Latest
 
+# NOTE: 定时触发已移除，避免与 daily_push.yml 重复触发同一时段推送。
+# 该 workflow 作为 Python 3.14 + bytecode 入口的精简调试通道，仅保留手动触发。
+# 唯一定时入口为 daily_push.yml（Docker 版本，含 artifact 去重/retry/alert）。
 on:
-  schedule:
-    - cron: "15 5 * * 1-5"
-    - cron: "30 5 * * 1-5"
-    - cron: "50 5 * * 1-5"
-    - cron: "15 9 * * 1-5"
-    - cron: "30 9 * * 1-5"
-    - cron: "50 9 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:

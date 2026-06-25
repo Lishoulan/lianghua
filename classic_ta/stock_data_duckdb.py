@@ -371,6 +371,16 @@ def _fetch_raw_stock_data(ts_code, start_date=None, end_date=None):
     except Exception:
         pass
 
+    # 降级到 baostock（免费、无 token、原生前复权，自有 TCP 服务非爬虫）
+    # 定位：akshare 爬虫被封/限流时的稳定补充层，海外可达性优于爬虫类
+    try:
+        from scripts.baostock_data_source import fetch_qfq_history as _bs_fetch
+        df = _bs_fetch(ts_code, start_date=start_date, end_date=end_date, adjustflag="2")
+        if df is not None and not df.empty:
+            return df[["Open", "High", "Low", "Close", "Volume"]]
+    except Exception:
+        pass
+
     # 降级到 tushare（手动前复权）—— 频率限制：强制每秒 ≤3 次
     try:
         import tushare as ts

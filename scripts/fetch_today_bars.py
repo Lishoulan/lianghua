@@ -141,7 +141,27 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
         "latest_date": trade_date,
         "days_backfilled": len(dates_to_fetch),
     }
-    print(f"[fetch_today_bars] ✅ 完成: {result}", flush=True)
+    print(f"[fetch_today_bars] tushare 阶段完成: {result}", flush=True)
+
+    # 4. BaoStock 补全：tushare 因复权校验跳过的股票，用 baostock 前复权数据补全
+    #    tushare 的 _merge_day_to_duckdb 会跳过除权除息股票（pre_close 不匹配），
+    #    baostock 服务端已处理前复权，可直接补全这些缺口。
+    try:
+        from scripts.baostock_batch_update import batch_update as _bs_batch_update
+        print("[fetch_today_bars] 启动 baostock 补全滞后股票...", flush=True)
+        bs_result = _bs_batch_update(target_date=trade_date, workers=1, max_retries=2)
+        result["baostock_updated"] = bs_result.get("updated", 0)
+        result["baostock_failed"] = bs_result.get("failed", 0)
+        result["baostock_rows"] = bs_result.get("rows_added", 0)
+        print(f"[fetch_today_bars] baostock 补全完成: 更新={bs_result.get('updated',0)} "
+              f"失败={bs_result.get('failed',0)} 新增行={bs_result.get('rows_added',0)}", flush=True)
+    except Exception as e:
+        print(f"[fetch_today_bars] baostock 补全异常（不影响主流程）: {e}", flush=True)
+        result["baostock_updated"] = 0
+        result["baostock_failed"] = 0
+        result["baostock_rows"] = 0
+
+    print(f"[fetch_today_bars] 全部完成: {result}", flush=True)
     return result
 
 
