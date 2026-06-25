@@ -18,13 +18,14 @@ from scripts.run_bytecode_daily_push import refresh_reference_cache, run_daily_p
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prewarm data, validate freshness, then run the current daily push.")
     parser.add_argument("--mode", choices=["intraday", "after_hours"], required=True)
-    parser.add_argument("--retries", type=int, default=3)
-    parser.add_argument("--base-sleep", type=int, default=20)
+    parser.add_argument("--retries", type=int, default=15)
+    parser.add_argument("--base-sleep", type=int, default=120)
     args = parser.parse_args()
 
+    current_mode = args.mode
     last_error: Exception | None = None
     for attempt in range(1, args.retries + 1):
-        print(f"[pipeline] attempt {attempt}/{args.retries} mode={args.mode}")
+        print(f"[pipeline] attempt {attempt}/{args.retries} mode={current_mode}")
         try:
             print("[pipeline] prewarm latest data")
             run_prewarm()
@@ -32,7 +33,7 @@ def main() -> None:
             print("[pipeline] refresh reference cache")
             refresh_reference_cache()
 
-            expected, latest = ensure_freshness(args.mode)
+            expected, latest = ensure_freshness(current_mode)
             print(f"[pipeline] freshness_ok latest={latest} expected={expected}")
 
             print("[pipeline] run daily push")
@@ -43,6 +44,11 @@ def main() -> None:
             last_error = exc
             print(f"[pipeline] attempt {attempt} failed: {exc}")
             traceback.print_exc()
+            # 降级兜底：盘后数据延迟，重试到第5次（约等了10分钟）后切换为盘中实时切片兜底
+            if args.mode == "after_hours" and current_mode == "after_hours" and attempt >= 5:
+                print("[pipeline] WARN after_hours data still unavailable after 5 attempts, "
+                      "switching to intraday realtime snapshot fallback")
+                current_mode = "intraday"
             if attempt < args.retries:
                 sleep_for = args.base_sleep * attempt
                 print(f"[pipeline] sleep {sleep_for}s before retry")

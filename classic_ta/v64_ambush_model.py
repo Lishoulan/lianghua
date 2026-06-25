@@ -196,27 +196,37 @@ def add_entry_quality_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Da
     if params is None:
         params = V64_PARAMS
 
-    body = (df["Close"] - df["Open"]).abs()
-    lower_shadow = df[["Close", "Open"]].min(axis=1) - df["Low"]
+    # ── 底层数组（Numpy 向量化，避免 Pandas 临时对象）──
+    c = df["Close"].values
+    o = df["Open"].values
+    l = df["Low"].values
+    h = df["High"].values
+    body = np.abs(c - o)
+    lower_shadow = np.minimum(c, o) - l
 
-    # E1: J值深度 (0~2分)
+    # E1: J值深度 (0~2分) —— np.select 一次性赋值，避免多次 df.loc 链式写入
     if params.get("eq_j_enabled", True):
         j_extreme = params.get("eq_j_extreme", 0)
         j_very = params.get("eq_j_very_oversold", 5)
-        df["eq_j_score"] = 0
-        df.loc[df["J"] < j_very, "eq_j_score"] = 1
-        df.loc[df["J"] < j_extreme, "eq_j_score"] = 2
+        j_vals = df["J"].values
+        df["eq_j_score"] = np.select(
+            [j_vals < j_extreme, j_vals < j_very],
+            [2, 1],
+            default=0,
+        ).astype(int)
     else:
         df["eq_j_score"] = 0
 
-    # E2: 量能枯竭度 (0~2分)
+    # E2: 量能枯竭度 (0~2分) —— np.select 一次性赋值
     if params.get("eq_vol_enabled", True):
         vol_extreme = params.get("eq_vol_extreme", 0.30)
         vol_very = params.get("eq_vol_very_low", 0.50)
-        vol_ratio = df["Volume"] / (df["volume_ma"] + 1e-8)
-        df["eq_vol_score"] = 0
-        df.loc[vol_ratio < vol_very, "eq_vol_score"] = 1
-        df.loc[vol_ratio < vol_extreme, "eq_vol_score"] = 2
+        vol_ratio = df["Volume"].values / (df["volume_ma"].values + 1e-8)
+        df["eq_vol_score"] = np.select(
+            [vol_ratio < vol_extreme, vol_ratio < vol_very],
+            [2, 1],
+            default=0,
+        ).astype(int)
     else:
         df["eq_vol_score"] = 0
 
@@ -257,8 +267,8 @@ def add_entry_quality_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Da
         df["eq_ma_score"] = 0
 
     if params.get("eq_support_enabled", True):
-        support_one = params.get("eq_support_score_one", 2)
-        support_two = params.get("eq_support_score_two", 3)
+        support_one = params.get("eq_support_score_one", 3)
+        support_two = params.get("eq_support_score_two", 4)
         support_raw = df["inst_support_score"] if "inst_support_score" in df.columns else pd.Series(0, index=df.index)
         df["eq_support_score"] = 0
         df.loc[support_raw >= support_one, "eq_support_score"] = 1
@@ -347,11 +357,23 @@ def add_inst_support_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Dat
     if params is None:
         params = V64_PARAMS
 
-    # ── 预计算共用指标 ──
-    body = (df["Close"] - df["Open"]).abs()
-    lower_shadow = df[["Close", "Open"]].min(axis=1) - df["Low"]
-    upper_shadow = df["High"] - df[["Close", "Open"]].max(axis=1)
-    amplitude = df["High"] - df["Low"]
+    # ── 预计算共用指标（Numpy 向量化，剥离 Pandas 临时对象）──
+    c = df["Close"].values
+    o = df["Open"].values
+    l = df["Low"].values
+    h = df["High"].values
+    body = np.abs(c - o)
+    lower_shadow = np.minimum(c, o) - l
+    upper_shadow = h - np.maximum(c, o)
+    amplitude = h - l
+
+    # MACD 向量化计算（DIF/DEA/HIST，禁止 TA-Lib）
+    c_series = df["Close"]
+    ema12 = c_series.ewm(span=12, adjust=False).mean().values
+    ema26 = c_series.ewm(span=26, adjust=False).mean().values
+    macd_dif = ema12 - ema26
+    macd_dea = pd.Series(macd_dif).ewm(span=9, adjust=False).mean().values
+    macd_hist = (macd_dif - macd_dea) * 2
 
     # OBV
     if "obv" not in df.columns:
@@ -474,18 +496,41 @@ def add_inst_support_indicators(df: pd.DataFrame, params: Dict = None) -> pd.Dat
         df["factor_d_intraday_accum"] = False
 
     # ──────────────────────────────────────────────────────────
-    #  综合评分（各因子等权，总分0~4分）
+    #  因子E：MACD 底背离
+    #  价格创近期新低 但 MACD 绿柱未创新低（杀跌动能衰竭）
+    #  含义：下跌动能枯竭，主力资金在低位暗中吸纳
+    # ──────────────────────────────────────────────────────────
+    if params.get("factor_e_enabled", True):
+        lookback = params.get("factor_e_lookback", 12)
+        at_low_pct = params.get("factor_e_at_low_pct", 1.01)
+
+        # 1. 判断价格是否创近期新低
+        rolling_low_close = df["Close"].rolling(lookback, min_periods=max(lookback // 2, 3)).min()
+        is_at_low = df["Close"] <= rolling_low_close * at_low_pct
+
+        # 2. 判断 MACD 绿柱是否缩短（杀跌动能衰竭）
+        rolling_low_macd = pd.Series(macd_hist).rolling(lookback, min_periods=max(lookback // 2, 3)).min().values
+        macd_not_new_low = (macd_hist > rolling_low_macd + 1e-4) & (macd_hist < 0)
+
+        df["factor_e_macd_divergence"] = is_at_low & macd_not_new_low
+    else:
+        df["factor_e_macd_divergence"] = False
+
+    # ──────────────────────────────────────────────────────────
+    #  综合评分（各因子等权，总分0~5分）
     # ──────────────────────────────────────────────────────────
     w_a = params.get("factor_a_weight", 1)
     w_b = params.get("factor_b_weight", 1)
     w_c = params.get("factor_c_weight", 1)
     w_d = params.get("factor_d_weight", 1)
+    w_e = params.get("factor_e_weight", 1)
 
     df["inst_support_score"] = (
         df["factor_a_vol_stable"].astype(int) * w_a
         + df["factor_b_vp_divergence"].astype(int) * w_b
         + df["factor_c_support_hold"].astype(int) * w_c
         + df["factor_d_intraday_accum"].astype(int) * w_d
+        + df["factor_e_macd_divergence"].astype(int) * w_e
     )
 
     return df

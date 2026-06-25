@@ -16,6 +16,18 @@ import time
 import threading
 from pathlib import Path
 
+# Tushare 频率超限重试机制
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+    TENACITY_AVAILABLE = True
+except ImportError:
+    TENACITY_AVAILABLE = False
+
+
+class TushareRateLimitError(Exception):
+    """Tushare 接口频率超限异常"""
+    pass
+
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -72,11 +84,15 @@ def _get_duckdb_conn():
 
 
 def _get_duckdb_read_conn():
-    """获取DuckDB只读连接（无需加锁，支持并行读）"""
+    """获取DuckDB读取连接（使用 read_only=False 统一配置，避免与写连接配置冲突）
+
+    注意：DuckDB 不允许同一数据库文件同时存在 read_only=True 和 read_only=False 的连接。
+    因此所有连接统一使用 read_only=False，写操作由 _duckdb_write_lock 保护并发安全。
+    """
     import duckdb
     if not DUCKDB_PATH.exists():
         return None
-    conn = duckdb.connect(str(DUCKDB_PATH), read_only=True)
+    conn = duckdb.connect(str(DUCKDB_PATH), read_only=False)
     return conn
 
 
@@ -355,7 +371,7 @@ def _fetch_raw_stock_data(ts_code, start_date=None, end_date=None):
     except Exception:
         pass
 
-    # 降级到 tushare（手动前复权）
+    # 降级到 tushare（手动前复权）—— 频率限制：强制每秒 ≤3 次
     try:
         import tushare as ts
         from dotenv import load_dotenv
@@ -366,10 +382,14 @@ def _fetch_raw_stock_data(ts_code, start_date=None, end_date=None):
             return None
         pro = ts.pro_api(token)
 
+        # 强制降速：每次 Tushare 调用前 sleep 0.35s（≤3 次/秒）
+        time.sleep(0.35)
         df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
         if df is None or len(df) == 0:
             return None
 
+        # adj_factor 同样消耗 Tushare 配额，继续降速
+        time.sleep(0.35)
         try:
             adj = pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date)
             if adj is not None and len(adj) > 0:
@@ -395,8 +415,14 @@ def _fetch_raw_stock_data(ts_code, start_date=None, end_date=None):
         if df.empty:
             return None
         return df[["Open", "High", "Low", "Close", "Volume"]]
-    except Exception:
-        time.sleep(0.3)
+    except Exception as e:
+        # 捕获 Tushare 频率超限异常，退避等待后返回 None 触发上层重试
+        err_msg = str(e)
+        if "抱歉" in err_msg and ("每分钟" in err_msg or "频率" in err_msg or "访问" in err_msg):
+            logger.warning(f"Tushare 频率超限 {ts_code}: {err_msg[:80]}，退避 60s")
+            time.sleep(60)  # Tushare 按分钟限流，等满 1 分钟
+        else:
+            time.sleep(0.3)
         return None
 
 
@@ -526,9 +552,12 @@ def batch_update_stocks(ts_codes: list):
                 updated += 1
             else:
                 failed += 1
+            # 强制降速：每次请求后 sleep 0.35s，避免 Tushare 频率超限
+            time.sleep(0.35)
         except Exception as e:
             logger.warning(f"批量更新失败 {ts_code}: {e}")
             failed += 1
+            time.sleep(0.35)
 
     logger.info(f"批量更新完成: 成功={updated} 失败={failed}")
     return {"updated": updated, "failed": failed}

@@ -19,7 +19,7 @@ import logging
 import asyncio
 from pathlib import Path
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import pandas as pd
 
@@ -303,7 +303,7 @@ class SyncScanner:
         start_time = time.time()
         timed_out = False
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {}
             for ts_code, name, industry in all_stocks:
                 rt_quote = realtime_quotes.get(ts_code) if is_intraday else None
