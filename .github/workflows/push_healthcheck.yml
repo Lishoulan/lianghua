@@ -112,7 +112,7 @@ jobs:
 
       - name: Close stale healthcheck alerts on recovery
         if: steps.inspect.outputs.healthy == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           SLOT_LABEL: ${{ steps.meta.outputs.slot_label }}
           TODAY_BJT: ${{ steps.meta.outputs.today_bjt }}
@@ -154,7 +154,7 @@ jobs:
       - name: Create or update healthcheck alert issue
         id: issue_alert
         if: steps.inspect.outputs.healthy != 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           SLOT: ${{ steps.meta.outputs.slot }}
           SLOT_LABEL: ${{ steps.meta.outputs.slot_label }}
