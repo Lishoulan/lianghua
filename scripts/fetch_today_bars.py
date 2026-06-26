@@ -153,64 +153,74 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
         all_skipped_codes = list(set(all_skipped_codes))
         print(f"[fetch_today_bars] 启动 baostock 补全 {len(all_skipped_codes)} 只除权除息股票...", flush=True)
         try:
-            from scripts.baostock_data_source import fetch_qfq_history
+            from scripts.baostock_data_source import fetch_qfq_history, health_check
             import duckdb as _duckdb
 
-            bs_updated = 0
-            bs_failed = 0
-            bs_rows = 0
-            # 使用单一共享连接，避免频繁开关连接导致文件锁残留
-            bs_conn = _duckdb.connect(str(DUCKDB_PATH), read_only=False)
-            try:
-                for i, ts_code in enumerate(all_skipped_codes, 1):
-                    try:
-                        df = fetch_qfq_history(ts_code, start_date=trade_date, end_date=trade_date, adjustflag="2")
-                        if df is None or df.empty:
-                            bs_failed += 1
-                            continue
+            # 连通性预检：baostock 在 GitHub Actions 海外环境可能不可达
+            # 预检失败则跳过 baostock 补全，避免 294 只 × 3s timeout 浪费 15+ 分钟
+            if not health_check():
+                print("[fetch_today_bars] baostock 连通性预检失败（海外 IP 可能不可达），跳过补全", flush=True)
+                result["baostock_updated"] = 0
+                result["baostock_failed"] = 0
+                result["baostock_rows"] = 0
+            else:
+                print("[fetch_today_bars] baostock 连通性预检通过", flush=True)
 
-                        rows = []
-                        for date, row in df.iterrows():
-                            rows.append({
-                                "ts_code": ts_code,
-                                "date": pd.Timestamp(date).date(),
-                                "open": float(row["Open"]),
-                                "high": float(row["High"]),
-                                "low": float(row["Low"]),
-                                "close": float(row["Close"]),
-                                "volume": float(row["Volume"]),
-                            })
-                        if rows:
-                            df_insert = pd.DataFrame(rows)
-                            try:
-                                bs_conn.execute("BEGIN TRANSACTION")
-                                bs_conn.execute(
-                                    "INSERT INTO daily_data (ts_code, date, open, high, low, close, volume) "
-                                    "SELECT ts_code, date, open, high, low, close, volume FROM df_insert"
-                                )
-                                bs_conn.execute("COMMIT")
-                                bs_updated += 1
-                                bs_rows += len(rows)
-                            except Exception as e:
-                                try:
-                                    bs_conn.execute("ROLLBACK")
-                                except Exception:
-                                    pass
+                bs_updated = 0
+                bs_failed = 0
+                bs_rows = 0
+                # 使用单一共享连接，避免频繁开关连接导致文件锁残留
+                bs_conn = _duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                try:
+                    for i, ts_code in enumerate(all_skipped_codes, 1):
+                        try:
+                            df = fetch_qfq_history(ts_code, start_date=trade_date, end_date=trade_date, adjustflag="2")
+                            if df is None or df.empty:
                                 bs_failed += 1
-                    except Exception:
-                        bs_failed += 1
+                                continue
 
-                    if i % 20 == 0:
-                        print(f"[fetch_today_bars] baostock 补全进度 {i}/{len(all_skipped_codes)}", flush=True)
-            finally:
-                # 确保连接关闭，释放 DuckDB 文件锁，否则后续扫描阶段无法获取锁
-                bs_conn.close()
+                            rows = []
+                            for date, row in df.iterrows():
+                                rows.append({
+                                    "ts_code": ts_code,
+                                    "date": pd.Timestamp(date).date(),
+                                    "open": float(row["Open"]),
+                                    "high": float(row["High"]),
+                                    "low": float(row["Low"]),
+                                    "close": float(row["Close"]),
+                                    "volume": float(row["Volume"]),
+                                })
+                            if rows:
+                                df_insert = pd.DataFrame(rows)
+                                try:
+                                    bs_conn.execute("BEGIN TRANSACTION")
+                                    bs_conn.execute(
+                                        "INSERT INTO daily_data (ts_code, date, open, high, low, close, volume) "
+                                        "SELECT ts_code, date, open, high, low, close, volume FROM df_insert"
+                                    )
+                                    bs_conn.execute("COMMIT")
+                                    bs_updated += 1
+                                    bs_rows += len(rows)
+                                except Exception as e:
+                                    try:
+                                        bs_conn.execute("ROLLBACK")
+                                    except Exception:
+                                        pass
+                                    bs_failed += 1
+                        except Exception:
+                            bs_failed += 1
 
-            result["baostock_updated"] = bs_updated
-            result["baostock_failed"] = bs_failed
-            result["baostock_rows"] = bs_rows
-            print(f"[fetch_today_bars] baostock 补全完成: 更新={bs_updated} "
-                  f"失败={bs_failed} 新增行={bs_rows}", flush=True)
+                        if i % 20 == 0:
+                            print(f"[fetch_today_bars] baostock 补全进度 {i}/{len(all_skipped_codes)}", flush=True)
+                finally:
+                    # 确保连接关闭，释放 DuckDB 文件锁，否则后续扫描阶段无法获取锁
+                    bs_conn.close()
+
+                result["baostock_updated"] = bs_updated
+                result["baostock_failed"] = bs_failed
+                result["baostock_rows"] = bs_rows
+                print(f"[fetch_today_bars] baostock 补全完成: 更新={bs_updated} "
+                      f"失败={bs_failed} 新增行={bs_rows}", flush=True)
         except Exception as e:
             print(f"[fetch_today_bars] baostock 补全异常（不影响主流程）: {e}", flush=True)
             result["baostock_updated"] = 0
@@ -274,7 +284,19 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
         except Exception:
             continue
 
+        row = row_ts.iloc[0]
+
         if db_row is None:
+            # DuckDB 中无该股票历史数据（全新缓存或新股），直接写入，跳过复权校验
+            rows_to_insert.append({
+                "ts_code": ts_code,
+                "date": pd.Timestamp(trade_date),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["vol"]),
+            })
             continue
 
         db_close = float(db_row[0])
@@ -284,8 +306,6 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
         if abs(db_close - ts_pre_close) > 0.01:
             skipped_codes.append(ts_code)
             continue
-
-        row = row_ts.iloc[0]
         rows_to_insert.append({
             "ts_code": ts_code,
             "date": pd.Timestamp(trade_date),
