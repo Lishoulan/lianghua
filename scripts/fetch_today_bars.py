@@ -267,14 +267,31 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
     df_latest["latest_date"] = pd.to_datetime(df_latest["latest_date"])
     need_update = set(df_latest[df_latest["latest_date"] < trade_date_ts]["ts_code"].tolist())
 
-    # 直接写入 tushare 不复权数据到 DuckDB 缓存
-    # 注意: tushare pro.daily() 返回不复权数据，DuckDB 中可能已有前复权数据（来自 akshare/baostock）
-    # 这里不做复权校验，直接写入当日数据作为缓存。
-    # 原因: 复权校验 (db_close != ts_pre_close) 对前复权缓存必然失败，导致所有股票被跳过(merged=0)。
-    # 扫描阶段 _fetch_raw_stock_data 会重新获取前复权数据，DuckDB 仅作缓存加速。
-    # 除权除息股票也直接写入（tushare 不复权数据），扫描时会用 akshare/baostock 获取正确前复权数据。
+    # 前复权转换：tushare pro.daily() 返回不复权数据，DuckDB 存前复权数据
+    # 用 DuckDB 最后 close / tushare pre_close 计算复权比率，将当日不复权数据转为前复权
+    # ratio = db_close(前复权) / ts_pre_close(不复权)
+    # adj_price = ts_price(不复权) × ratio
     rows_to_insert = []
-    skipped_codes = []  # 保留接口兼容，实际不再跳过
+    skipped_codes = []  # db_row is None 的新股，无法计算比率
+
+    # 批量读取所有需要更新股票的最后 close（避免逐股查询）
+    need_update_list = list(need_update)
+    if need_update_list:
+        placeholders = ",".join(["?"] * len(need_update_list))
+        try:
+            df_db_close = read_conn.execute(
+                f"SELECT ts_code, close FROM daily_data "
+                f"WHERE (ts_code, date) IN ("
+                f"  SELECT ts_code, MAX(date) FROM daily_data "
+                f"  WHERE ts_code IN ({placeholders}) GROUP BY ts_code"
+                f")",
+                need_update_list
+            ).fetch_df()
+            db_close_map = dict(zip(df_db_close["ts_code"], df_db_close["close"]))
+        except Exception:
+            db_close_map = {}
+    else:
+        db_close_map = {}
 
     for ts_code in need_update:
         row_ts = df_day[df_day["ts_code"] == ts_code]
@@ -282,13 +299,37 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
             continue
 
         row = row_ts.iloc[0]
+        db_close = db_close_map.get(ts_code)
+
+        if db_close is None:
+            # DuckDB 中无该股票历史数据（新股/全新缓存），直接写入不复权数据
+            # 新股无历史前复权基准，不复权即为前复权
+            rows_to_insert.append({
+                "ts_code": ts_code,
+                "date": pd.Timestamp(trade_date),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["vol"]),
+            })
+            continue
+
+        # 计算复权比率
+        ts_pre_close = float(row["pre_close"])
+        if ts_pre_close <= 0:
+            continue
+
+        ratio = float(db_close) / ts_pre_close
+
+        # 用比率将不复权数据转为前复权
         rows_to_insert.append({
             "ts_code": ts_code,
             "date": pd.Timestamp(trade_date),
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
+            "open": float(row["open"]) * ratio,
+            "high": float(row["high"]) * ratio,
+            "low": float(row["low"]) * ratio,
+            "close": float(row["close"]) * ratio,
             "volume": float(row["vol"]),
         })
 
