@@ -103,6 +103,7 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
     total_fetched = 0
     total_merged = 0
     total_skipped = 0
+    all_skipped_codes = []  # 收集所有被 tushare 跳过的 ts_code，供 baostock 补全
 
     for dt in dates_to_fetch:
         try:
@@ -128,9 +129,10 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
         if not DUCKDB_PATH.exists():
             continue
 
-        merged, skipped = _merge_day_to_duckdb(df_day, dt)
+        merged, skipped_codes = _merge_day_to_duckdb(df_day, dt)
         total_merged += merged
-        total_skipped += skipped
+        total_skipped += len(skipped_codes)
+        all_skipped_codes.extend(skipped_codes)
 
     close_thread_local_conns()
 
@@ -143,20 +145,76 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
     }
     print(f"[fetch_today_bars] tushare 阶段完成: {result}", flush=True)
 
-    # 4. BaoStock 补全：tushare 因复权校验跳过的股票，用 baostock 前复权数据补全
-    #    tushare 的 _merge_day_to_duckdb 会跳过除权除息股票（pre_close 不匹配），
-    #    baostock 服务端已处理前复权，可直接补全这些缺口。
-    try:
-        from scripts.baostock_batch_update import batch_update as _bs_batch_update
-        print("[fetch_today_bars] 启动 baostock 补全滞后股票...", flush=True)
-        bs_result = _bs_batch_update(target_date=trade_date, workers=1, max_retries=2)
-        result["baostock_updated"] = bs_result.get("updated", 0)
-        result["baostock_failed"] = bs_result.get("failed", 0)
-        result["baostock_rows"] = bs_result.get("rows_added", 0)
-        print(f"[fetch_today_bars] baostock 补全完成: 更新={bs_result.get('updated',0)} "
-              f"失败={bs_result.get('failed',0)} 新增行={bs_result.get('rows_added',0)}", flush=True)
-    except Exception as e:
-        print(f"[fetch_today_bars] baostock 补全异常（不影响主流程）: {e}", flush=True)
+    # 4. BaoStock 补全：仅补全 tushare 因复权校验跳过的除权除息股票
+    #    通常只有几十只（除权除息日股票），而非全市场 4800+ 只
+    #    baostock 串行处理，每只约 3 秒，几十只需 2-3 分钟
+    if all_skipped_codes:
+        # 去重
+        all_skipped_codes = list(set(all_skipped_codes))
+        print(f"[fetch_today_bars] 启动 baostock 补全 {len(all_skipped_codes)} 只除权除息股票...", flush=True)
+        try:
+            from scripts.baostock_data_source import fetch_qfq_history
+            import duckdb as _duckdb
+
+            bs_updated = 0
+            bs_failed = 0
+            bs_rows = 0
+            for i, ts_code in enumerate(all_skipped_codes, 1):
+                try:
+                    df = fetch_qfq_history(ts_code, start_date=trade_date, end_date=trade_date, adjustflag="2")
+                    if df is None or df.empty:
+                        bs_failed += 1
+                        continue
+
+                    conn = _duckdb.connect(str(DUCKDB_PATH), read_only=False)
+                    try:
+                        rows = []
+                        for date, row in df.iterrows():
+                            rows.append({
+                                "ts_code": ts_code,
+                                "date": pd.Timestamp(date).date(),
+                                "open": float(row["Open"]),
+                                "high": float(row["High"]),
+                                "low": float(row["Low"]),
+                                "close": float(row["Close"]),
+                                "volume": float(row["Volume"]),
+                            })
+                        if rows:
+                            df_insert = pd.DataFrame(rows)
+                            conn.execute("BEGIN TRANSACTION")
+                            conn.execute(
+                                "INSERT INTO daily_data (ts_code, date, open, high, low, close, volume) "
+                                "SELECT ts_code, date, open, high, low, close, volume FROM df_insert"
+                            )
+                            conn.execute("COMMIT")
+                            bs_updated += 1
+                            bs_rows += len(rows)
+                    except Exception as e:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                        bs_failed += 1
+                    finally:
+                        conn.close()
+                except Exception:
+                    bs_failed += 1
+
+                if i % 20 == 0:
+                    print(f"[fetch_today_bars] baostock 补全进度 {i}/{len(all_skipped_codes)}", flush=True)
+
+            result["baostock_updated"] = bs_updated
+            result["baostock_failed"] = bs_failed
+            result["baostock_rows"] = bs_rows
+            print(f"[fetch_today_bars] baostock 补全完成: 更新={bs_updated} "
+                  f"失败={bs_failed} 新增行={bs_rows}", flush=True)
+        except Exception as e:
+            print(f"[fetch_today_bars] baostock 补全异常（不影响主流程）: {e}", flush=True)
+            result["baostock_updated"] = 0
+            result["baostock_failed"] = 0
+            result["baostock_rows"] = 0
+    else:
+        print("[fetch_today_bars] 无除权除息股票需要 baostock 补全", flush=True)
         result["baostock_updated"] = 0
         result["baostock_failed"] = 0
         result["baostock_rows"] = 0
@@ -191,7 +249,7 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
 
     # 前复权校验：对比 DuckDB close[-1] vs pro.daily pre_close
     rows_to_insert = []
-    skipped_dividend = 0
+    skipped_codes = []  # 记录被跳过的 ts_code，供 baostock 补全
 
     for ts_code in need_update:
         row_ts = df_day[df_day["ts_code"] == ts_code]
@@ -214,7 +272,7 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
 
         # 复权校验：如果 DuckDB 最后 close != tushare pre_close，说明有除权除息或数据缺口
         if abs(db_close - ts_pre_close) > 0.01:
-            skipped_dividend += 1
+            skipped_codes.append(ts_code)
             continue
 
         row = row_ts.iloc[0]
@@ -249,7 +307,7 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
         finally:
             write_conn.close()
 
-    return merged, skipped_dividend
+    return merged, skipped_codes
 
 
 if __name__ == "__main__":
