@@ -261,51 +261,27 @@ def _merge_day_to_duckdb(df_day: pd.DataFrame, trade_date: str) -> tuple[int, in
     except Exception as e:
         read_conn.close()
         print(f"[fetch_today_bars] 读取 DuckDB 最新日期失败: {e}", flush=True)
-        return 0, len(df_day)
+        return 0, []
 
     trade_date_ts = pd.Timestamp(trade_date)
     df_latest["latest_date"] = pd.to_datetime(df_latest["latest_date"])
     need_update = set(df_latest[df_latest["latest_date"] < trade_date_ts]["ts_code"].tolist())
 
-    # 前复权校验：对比 DuckDB close[-1] vs pro.daily pre_close
+    # 直接写入 tushare 不复权数据到 DuckDB 缓存
+    # 注意: tushare pro.daily() 返回不复权数据，DuckDB 中可能已有前复权数据（来自 akshare/baostock）
+    # 这里不做复权校验，直接写入当日数据作为缓存。
+    # 原因: 复权校验 (db_close != ts_pre_close) 对前复权缓存必然失败，导致所有股票被跳过(merged=0)。
+    # 扫描阶段 _fetch_raw_stock_data 会重新获取前复权数据，DuckDB 仅作缓存加速。
+    # 除权除息股票也直接写入（tushare 不复权数据），扫描时会用 akshare/baostock 获取正确前复权数据。
     rows_to_insert = []
-    skipped_codes = []  # 记录被跳过的 ts_code，供 baostock 补全
+    skipped_codes = []  # 保留接口兼容，实际不再跳过
 
     for ts_code in need_update:
         row_ts = df_day[df_day["ts_code"] == ts_code]
         if row_ts.empty:
             continue
 
-        try:
-            db_row = read_conn.execute(
-                "SELECT close FROM daily_data WHERE ts_code = ? ORDER BY date DESC LIMIT 1",
-                [ts_code]
-            ).fetchone()
-        except Exception:
-            continue
-
         row = row_ts.iloc[0]
-
-        if db_row is None:
-            # DuckDB 中无该股票历史数据（全新缓存或新股），直接写入，跳过复权校验
-            rows_to_insert.append({
-                "ts_code": ts_code,
-                "date": pd.Timestamp(trade_date),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["vol"]),
-            })
-            continue
-
-        db_close = float(db_row[0])
-        ts_pre_close = float(row_ts["pre_close"].iloc[0])
-
-        # 复权校验：如果 DuckDB 最后 close != tushare pre_close，说明有除权除息或数据缺口
-        if abs(db_close - ts_pre_close) > 0.01:
-            skipped_codes.append(ts_code)
-            continue
         rows_to_insert.append({
             "ts_code": ts_code,
             "date": pd.Timestamp(trade_date),
