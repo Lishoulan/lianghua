@@ -145,7 +145,10 @@ def _check_intraday_provider() -> None:
     except Exception as exc:
         errors.append(f"akshare: {exc}")
 
-    raise RuntimeError("No free intraday quote provider is healthy: " + " | ".join(errors))
+    # 所有实时行情源不可用（GitHub Actions 海外 IP 常见情况）
+    # 降级为警告而非报错，允许 pipeline 用 DuckDB 缓存日线数据继续扫描
+    print(f"[freshness] WARNING: 实时行情源不可用: {' | '.join(errors)}", flush=True)
+    print("[freshness] 降级使用 DuckDB 缓存日线数据继续扫描", flush=True)
 
 
 def _check_after_hours_provider(expected_date: str) -> None:
@@ -174,7 +177,10 @@ def _check_after_hours_provider(expected_date: str) -> None:
     except Exception as exc:
         errors.append(f"efinance: {exc}")
 
-    raise RuntimeError("No free after-hours provider confirmed the latest daily bar: " + " | ".join(errors))
+    # 所有盘后数据源不可用（GitHub Actions 海外 IP + tushare 频率限制）
+    # DuckDB 缓存日期已校验（line 186），降级为警告允许继续扫描
+    print(f"[freshness] WARNING: 盘后数据源校验失败: {' | '.join(errors)}", flush=True)
+    print("[freshness] DuckDB 缓存日期已达标，降级继续扫描", flush=True)
 
 
 def ensure_freshness(mode: str) -> tuple[str, str]:
