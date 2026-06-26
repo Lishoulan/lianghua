@@ -180,6 +180,7 @@ def fetch_qfq_history(
                 bs.logout()
         except Exception:
             pass
+        socket.setdefaulttimeout(old_timeout)
 
 
 def query_all_stock_codes(trade_date: str | None = None) -> list[str]:
@@ -249,29 +250,34 @@ def query_all_stock_codes(trade_date: str | None = None) -> list[str]:
 def health_check() -> bool:
     """BaoStock 连通性健康检查（用于数据源预检）
 
+    使用 socket 级别超时防止在海外网络环境下长时间卡住。
+
     Returns:
         bool: True 表示可连通并获取数据
     """
     try:
         import baostock as bs
+        import socket
     except ImportError:
         return False
+
+    # 设置 socket 超时，防止海外网络环境下 connect 卡住
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(10)
 
     lg = None
     try:
         lg = bs.login()
         if getattr(lg, "error_code", "0") != "0":
             return False
-        # 用平安银行单股最近 5 天探测
+        # 用平安银行查询最近交易日数据探测（用昨天，确保有数据）
+        from datetime import timedelta
+        yesterday = (datetime.now(_BJT) - timedelta(days=1)).strftime("%Y%m%d")
         rs = bs.query_history_k_data_plus(
             "sz.000001",
             "date,close",
-            start_date=_to_baostock_date(
-                (datetime.now(_BJT)).strftime("%Y%m%d")
-            ),
-            end_date=_to_baostock_date(
-                (datetime.now(_BJT)).strftime("%Y%m%d")
-            ),
+            start_date=_to_baostock_date(yesterday),
+            end_date=_to_baostock_date(yesterday),
             frequency="d",
             adjustflag="2",
         )
@@ -284,6 +290,7 @@ def health_check() -> bool:
                 bs.logout()
         except Exception:
             pass
+        socket.setdefaulttimeout(old_timeout)
 
 
 if __name__ == "__main__":

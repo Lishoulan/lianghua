@@ -168,7 +168,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Run Daily Push in Docker
-        timeout-minutes: 28
+        timeout-minutes: 50
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           TIME_SLOT: ${{ needs.check-duplicate.outputs.time_slot }}
@@ -268,7 +268,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Retry Daily Push in Docker
-        timeout-minutes: 28
+        timeout-minutes: 50
         env:
           TIME_SLOT: ${{ needs.check-duplicate.outputs.time_slot }}
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
