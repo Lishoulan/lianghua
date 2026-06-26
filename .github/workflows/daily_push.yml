@@ -51,16 +51,20 @@ jobs:
                 ;;
             esac
           else
+            # workflow_dispatch 手动触发：按北京时间智能判断时段
+            # 盘中: 09:15-15:00 (BJ) = 01:15-07:00 (UTC)
+            # 盘后: 15:00-23:59 (BJ) = 07:00-15:59 (UTC)
+            # 盘前: 00:00-09:15 (BJ) = 16:00-01:15 (UTC) -> 视为 after_hours（用上一交易日数据）
             UTC_HOUR=$(date -u +%H)
             UTC_MIN=$(date -u +%M)
             UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
 
-            if [ "$UTC_MIN_TOTAL" -ge 240 ] && [ "$UTC_MIN_TOTAL" -lt 420 ]; then
+            if [ "$UTC_MIN_TOTAL" -ge 75 ] && [ "$UTC_MIN_TOTAL" -lt 420 ]; then
+              # 01:15-07:00 UTC = 09:15-15:00 BJ -> 盘中
               SLOT="intraday"
-            elif [ "$UTC_MIN_TOTAL" -ge 480 ] && [ "$UTC_MIN_TOTAL" -lt 660 ]; then
-              SLOT="after_hours"
             else
-              SLOT="unknown"
+              # 07:00-01:15 UTC = 15:00-09:15 BJ -> 盘后（含盘前，用上一交易日数据）
+              SLOT="after_hours"
             fi
           fi
 
