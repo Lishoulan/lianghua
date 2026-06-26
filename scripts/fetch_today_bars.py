@@ -159,15 +159,16 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
             bs_updated = 0
             bs_failed = 0
             bs_rows = 0
-            for i, ts_code in enumerate(all_skipped_codes, 1):
-                try:
-                    df = fetch_qfq_history(ts_code, start_date=trade_date, end_date=trade_date, adjustflag="2")
-                    if df is None or df.empty:
-                        bs_failed += 1
-                        continue
-
-                    conn = _duckdb.connect(str(DUCKDB_PATH), read_only=False)
+            # 使用单一共享连接，避免频繁开关连接导致文件锁残留
+            bs_conn = _duckdb.connect(str(DUCKDB_PATH), read_only=False)
+            try:
+                for i, ts_code in enumerate(all_skipped_codes, 1):
                     try:
+                        df = fetch_qfq_history(ts_code, start_date=trade_date, end_date=trade_date, adjustflag="2")
+                        if df is None or df.empty:
+                            bs_failed += 1
+                            continue
+
                         rows = []
                         for date, row in df.iterrows():
                             rows.append({
@@ -181,27 +182,29 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
                             })
                         if rows:
                             df_insert = pd.DataFrame(rows)
-                            conn.execute("BEGIN TRANSACTION")
-                            conn.execute(
-                                "INSERT INTO daily_data (ts_code, date, open, high, low, close, volume) "
-                                "SELECT ts_code, date, open, high, low, close, volume FROM df_insert"
-                            )
-                            conn.execute("COMMIT")
-                            bs_updated += 1
-                            bs_rows += len(rows)
-                    except Exception as e:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
+                            try:
+                                bs_conn.execute("BEGIN TRANSACTION")
+                                bs_conn.execute(
+                                    "INSERT INTO daily_data (ts_code, date, open, high, low, close, volume) "
+                                    "SELECT ts_code, date, open, high, low, close, volume FROM df_insert"
+                                )
+                                bs_conn.execute("COMMIT")
+                                bs_updated += 1
+                                bs_rows += len(rows)
+                            except Exception as e:
+                                try:
+                                    bs_conn.execute("ROLLBACK")
+                                except Exception:
+                                    pass
+                                bs_failed += 1
+                    except Exception:
                         bs_failed += 1
-                    finally:
-                        conn.close()
-                except Exception:
-                    bs_failed += 1
 
-                if i % 20 == 0:
-                    print(f"[fetch_today_bars] baostock 补全进度 {i}/{len(all_skipped_codes)}", flush=True)
+                    if i % 20 == 0:
+                        print(f"[fetch_today_bars] baostock 补全进度 {i}/{len(all_skipped_codes)}", flush=True)
+            finally:
+                # 确保连接关闭，释放 DuckDB 文件锁，否则后续扫描阶段无法获取锁
+                bs_conn.close()
 
             result["baostock_updated"] = bs_updated
             result["baostock_failed"] = bs_failed
@@ -218,6 +221,13 @@ def fetch_today_bars(trade_date: str | None = None) -> dict:
         result["baostock_updated"] = 0
         result["baostock_failed"] = 0
         result["baostock_rows"] = 0
+
+    # 最终确保所有 DuckDB 连接（thread-local + baostock 共享连接）都已关闭
+    # 否则后续扫描阶段会因文件锁冲突导致缓存加载失败
+    try:
+        close_thread_local_conns()
+    except Exception:
+        pass
 
     print(f"[fetch_today_bars] 全部完成: {result}", flush=True)
     return result
