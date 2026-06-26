@@ -1,17 +1,44 @@
+# ══════════════════════════════════════════════════════════
+# TradingAgents 本地 Docker 部署 — docker-compose.local.yml
+# 一键启动常驻调度器，数据持久化到宿主机
+# ══════════════════════════════════════════════════════════
+#
+# 用法:
+#   1. 确保项目根目录下有 .env 文件（含 TUSHARE_TOKEN, SERVERCHAN_KEY 等）
+#   2. 确保宿主机已安装 Docker + Docker Compose
+#   3. 启动:  docker compose -f docker-compose.local.yml up -d --build
+#   4. 查看日志: docker compose -f docker-compose.local.yml logs -f
+#   5. 停止:  docker compose -f docker-compose.local.yml down
+#
+# Volume 说明:
+#   - .env          -> /app/.env          (只读，防止容器修改密钥)
+#   - ./results     -> /app/results       (DuckDB 缓存 + 推送结果持久化)
+#   - ./logs        -> /app/logs          (调度器 + 扫描任务日志)
+# ══════════════════════════════════════════════════════════
+
 services:
   scanner:
     build:
       context: .
       dockerfile: Dockerfile.local
-    container_name: tradingagents-local-scanner
-    restart: unless-stopped
+    container_name: tradingagents-local
+    restart: always
     env_file:
-      - .env.docker.local
+      - .env
     environment:
-      TZ: Asia/Shanghai
-      RUN_MODE: cron
-      DOCKER_ENV_FILE: /app/.env.docker.local
+      - TZ=Asia/Shanghai
+      - RUN_MODE=local-scheduler
     volumes:
+      # 密钥配置（只读挂载，防止容器内意外修改）
+      - ./.env:/app/.env:ro
+      # DuckDB 缓存 + 每日推送结果（持久化到宿主机，容器重建不丢失）
       - ./results:/app/results
+      # 调度器日志 + 每次扫描的 stdout/stderr
       - ./logs:/app/logs
-      - ./.env.docker.local:/app/.env.docker.local:ro
+    # 资源限制（旧电脑可按需调整）
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G

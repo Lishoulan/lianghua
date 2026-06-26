@@ -185,7 +185,7 @@ def _is_trading_day():
 
 
 def prewarm_data():
-    """数据预热：健康预检 + 确保缓存就绪"""
+    """数据预热：健康预检 + 拉取最新日线 + 确保缓存就绪"""
     print("\n[预热] 数据源健康预检...", flush=True)
 
     cache_stats = get_cache_stats()
@@ -193,6 +193,18 @@ def prewarm_data():
     cache_size_mb = cache_stats.get("size_mb", 0)
     cache_ready = cache_count >= 1000
     print(f"  DuckDB cache: {cache_count} stocks | {cache_size_mb}MB", flush=True)
+
+    # ── 拉取当日最新日线数据，更新 DuckDB 缓存 ──
+    # 确保每次推送基于当天最新数据，而非过期的缓存
+    try:
+        from scripts.fetch_today_bars import fetch_today_bars
+        print("  [预热] 拉取当日最新日线数据...", flush=True)
+        fetch_result = fetch_today_bars()
+        merged = fetch_result.get("merged", 0)
+        skipped = fetch_result.get("skipped", 0)
+        print(f"  [预热] 日线更新完成: merged={merged} skipped={skipped}", flush=True)
+    except Exception as e:
+        print(f"  [预热] 日线更新失败（非致命，使用现有缓存）: {e}", flush=True)
 
     # 快速连通性检查（每个数据源5秒超时）
     akshare_ok = False

@@ -1,28 +1,44 @@
-FROM python:3.14-slim
+# ══════════════════════════════════════════════════════════
+# TradingAgents 本地 Docker 部署 — Dockerfile.local
+# 面向家庭旧电脑常驻运行，基于 APScheduler 线程调度器
+# ══════════════════════════════════════════════════════════
 
+FROM python:3.11-slim
+
+# 时区设为北京时间（交易时间判断依赖此时区）
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /app
 
+# Python 运行时优化
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    DOCKER_ENV_FILE=/app/.env.docker.local
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN apt-get update -o Acquire::Retries=5 && apt-get install -y --no-install-recommends \
-    cron \
+# 系统依赖：gcc/g++ 编译 duckdb 等 C 扩展，curl 用于调试
+# libgomp1 解决 lightgbm/catboost 的 OpenMP 依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
     curl \
-    tzdata \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# ── 依赖层（利用 Docker 层缓存，代码变更不重装依赖）──
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# ── 应用层 ──
 COPY . .
 
-RUN mkdir -p /app/results /app/logs
-RUN chmod +x /app/scripts/start_local_cron.sh
+# 创建日志目录
+RUN mkdir -p /app/logs /app/results/daily /app/results/oamv_cache
 
-CMD ["/app/scripts/start_local_cron.sh"]
+# 健康检查：验证调度器进程存活（不访问 DuckDB，避免文件锁冲突）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import os; os.kill(1, 0)" || exit 1
+
+# 入口：启动 APScheduler 常驻调度器
+CMD ["python", "-u", "local_scheduler.py"]

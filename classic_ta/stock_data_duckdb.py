@@ -84,16 +84,20 @@ def _get_duckdb_conn():
 
 
 def _get_duckdb_read_conn():
-    """获取DuckDB读取连接（使用 read_only=False 统一配置，避免与写连接配置冲突）
+    """获取DuckDB读取连接（read_only=True，允许同进程多线程并发读）
 
-    注意：DuckDB 不允许同一数据库文件同时存在 read_only=True 和 read_only=False 的连接。
-    因此所有连接统一使用 read_only=False，写操作由 _duckdb_write_lock 保护并发安全。
+    Windows 上 read_only=False 的多线程连接会触发文件锁冲突。
+    改用 read_only=True 后，多个线程可同时读取 DuckDB。
+    写操作由 _save_to_duckdb 单独处理（短连接，不与读冲突）。
     """
     import duckdb
     if not DUCKDB_PATH.exists():
         return None
-    conn = duckdb.connect(str(DUCKDB_PATH), read_only=False)
-    return conn
+    try:
+        conn = duckdb.connect(str(DUCKDB_PATH), read_only=True)
+        return conn
+    except Exception:
+        return None
 
 
 # ── 线程本地连接池（多线程扫描性能优化）──
@@ -294,24 +298,32 @@ def save_stock_cache(ts_code: str, df: pd.DataFrame):
 
 
 def _save_to_duckdb(ts_code: str, df: pd.DataFrame):
-    """保存到DuckDB（先删除旧数据再插入新数据，加锁防并发冲突）"""
+    """保存到DuckDB（先关闭线程本地读连接，再开短写连接，避免 read_only 冲突）"""
     try:
         with _duckdb_write_lock:
-            conn = _get_duckdb_conn()
-            # 删除该股票的旧数据
-            conn.execute("DELETE FROM daily_data WHERE ts_code = ?", [ts_code])
+            # 关闭当前线程的读连接（read_only=True 与 read_only=False 不能共存）
+            close_thread_local_conns()
 
-            # 准备插入数据
-            insert_df = df.copy()
-            insert_df["ts_code"] = ts_code
-            insert_df["date"] = insert_df.index.date if hasattr(insert_df.index, "date") else insert_df.index
+            import duckdb
+            conn = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+            try:
+                # 删除该股票的旧数据
+                conn.execute("DELETE FROM daily_data WHERE ts_code = ?", [ts_code])
 
-            # 确保列顺序正确
-            insert_df = insert_df[["ts_code", "date", "Open", "High", "Low", "Close", "Volume"]]
-            insert_df.columns = ["ts_code", "date", "open", "high", "low", "close", "volume"]
+                # 准备插入数据
+                insert_df = df.copy()
+                insert_df["ts_code"] = ts_code
+                insert_df["date"] = insert_df.index.date if hasattr(insert_df.index, "date") else insert_df.index
 
-            conn.execute("INSERT INTO daily_data SELECT * FROM insert_df")
-            conn.close()
+                # 确保列顺序正确
+                insert_df = insert_df[["ts_code", "date", "Open", "High", "Low", "Close", "Volume"]]
+                insert_df.columns = ["ts_code", "date", "open", "high", "low", "close", "volume"]
+
+                conn.execute("INSERT INTO daily_data SELECT * FROM insert_df")
+            finally:
+                conn.close()
+                # 重置线程本地读连接，下次读取时会重新打开
+                _thread_local.read_conn = None
     except Exception as e:
         logger.warning(f"DuckDB保存失败 {ts_code}: {e}，回退到CSV")
         _save_to_csv(ts_code, df)

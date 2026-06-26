@@ -16,6 +16,8 @@ pip_libs/
 
 # ── 环境变量（不提交） ──
 .env
+.env.bak
+.env.env.bak
 .env.docker.local
 .env.local
 .env.*.local

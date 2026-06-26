@@ -1,30 +1,49 @@
+# Git
 .git
-.github
 .gitignore
-.env
-.env.local
-.env.*.local
-__pycache__/
+
+# Python 缓存
+__pycache__
 *.pyc
 *.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.venv/
-venv/
-env/
-.vscode/
-.idea/
-.trae/
-.qoder/
-logs/
-results/
-*.duckdb
-*.duckdb.wal
+.pytest_cache
+.ruff_cache
+
+# IDE / 编辑器
+.vscode
+.idea
+.qoder
+.trae
+
+# 临时文件和日志
+.tmp
 *.log
-*.egg-info
+logs/
+
+# 分析脚本（不需要打包进镜像）
+analyze_*.py
+backtest_*.py
+check_*.py
+compare_*.py
+_temp_*.py
+
+# 文档（不需要进镜像）
+*.md
+docs/
+LICENSE
+
+# Docker 自身文件
+Dockerfile
+Dockerfile.local
+docker-compose.yml
+docker-compose.local.yml
+.dockerignore
+
+# GitHub Actions（本地不需要）
+.github
+
+# pip_libs 本地缓存的包（容器内 pip install 安装）
 pip_libs/
-tradingagents_env/
-.DS_Store
-Thumbs.db
+
+# pytest
+tests/
