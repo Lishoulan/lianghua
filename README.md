@@ -2,43 +2,55 @@
 
 # 量化潜伏系统
 
-**A-Share Quantitative Ambush Signal Detection System**
+**A-Share Quantitative Ambush Signal Research Framework**
 
-基于威科夫量价理论 + VPA量价分析的全市场潜伏信号自动筛选与推送系统
+威科夫量价理论 + VPA量价分析 \| 5年全市场回测验证 \| 多层止损体系参数寻优
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Tests](https://github.com/Lishoulan/lianghua/actions/workflows/tests.yml/badge.svg)](https://github.com/Lishoulan/lianghua/actions/workflows/tests.yml)
 [![Daily Push](https://github.com/Lishoulan/lianghua/actions/workflows/daily_push.yml/badge.svg)](https://github.com/Lishoulan/lianghua/actions/workflows/daily_push.yml)
 [![CodeQL](https://github.com/Lishoulan/lianghua/actions/workflows/codeql.yml/badge.svg)](https://github.com/Lishoulan/lianghua/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Strategy-V6.4-orange)]()
+[![Strategy](https://img.shields.io/badge/Strategy-V6.4.7-orange)]()
+[![Backtest](https://img.shields.io/badge/Backtest-5yr_+1389%-success)]()
 [![GitHub stars](https://img.shields.io/github/stars/Lishoulan/lianghua?style=social)](https://github.com/Lishoulan/lianghua/stargazers)
 
-[快速开始](#快速开始) · [订阅服务](#订阅服务架构) · [部署指南](docs/deploy.md) · [变更日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
+[研究框架](#研究框架) · [回测验证](#回测验证) · [参数寻优](#参数寻优体系) · [部署指南](docs/deploy.md) · [变更日志](CHANGELOG.md)
 
 </div>
 
 ---
 
-## 项目简介
+## 研究框架
 
-量化潜伏系统是一套面向 **A股全市场** 的自动化量化筛选工具，每日扫描近 5000 只股票，融合 **威科夫量价理论** 与 **VPA量价分析**，通过多维度量化模型识别潜在的潜伏买入信号，并通过 Server酱 + 微信公众号双通道将结果推送到用户。
+量化潜伏系统是一套面向 **A股全市场** 的量化研究框架，融合 **威科夫量价理论** 与 **VPA量价分析**，构建从信号检测、多层止损到市场择时的完整研究闭环。系统已通过 **5年全市场回测（4864只股票 × 2021-2026）** 系统性验证，并形成参数寻优方法论。
 
-系统支持 **GitHub Actions 零成本部署** 和 **Docker 容器化长期运行** 两种模式，可作为个人研究工具或微信公众号订阅服务长期运营。
+### 研究方法论
 
-### 核心策略：V6.4 潜伏模型
+本研究采用 **"信号检测 → 多层止损 → 市场择时 → 行业过滤 → 参数寻优"** 五层递进式研究框架，每层均通过全市场历史回测独立验证有效性：
 
-策略演进：V6.0（基础框架）→ V6.1（风险控制）→ V6.2（行业动量）→ V6.3（微观确认）→ **V6.4（入场质量评分）**
+| 研究层级 | 核心问题 | 方法论 | 验证方式 |
+|---------|---------|--------|---------|
+| **L1 信号检测** | 何时出现潜伏信号？ | 威科夫SOS锚定 + KDJ情绪冰点 + 量价共振 | 5年信号覆盖回测 |
+| **L2 多层止损** | 如何控制风险与锁定利润？ | 硬止损 + 保本 + 吊灯 + 档位止盈 + 时间止损 | 逐笔退出原因分析 |
+| **L3 市场择时** | 何时该买、何时该等？ | OAMV活跃市值滞后阈值 + 急跌保护 | 牛熊分解回测 |
+| **L4 行业过滤** | 在哪些行业选股？ | 行业动量矩阵 + RS排名前20% | 行业允许比例分析 |
+| **L5 参数寻优** | 参数是否最优？ | 三轮参数对比 + 敏感性分析 | A/B对比回测 |
 
-| 版本 | 核心改进 | 关键能力 |
+### 策略演进路径
+
+V6.0（基础框架）→ V6.1（风险控制）→ V6.2（行业动量）→ V6.3（微观确认）→ V6.4（入场质量评分）→ **V6.4.7（多层止损参数寻优）**
+
+| 版本 | 研究重点 | 核心贡献 |
 |------|---------|---------|
-| V6.0 | 威科夫SOS锚定 + 情绪冰点潜伏 | 5条件信号检测 |
-| V6.1 | ATR动态止损 + Buy Climax退出 | 风险控制体系 |
+| V6.0 | 威科夫SOS锚定 + 情绪冰点潜伏 | 5条件信号检测框架 |
+| V6.1 | ATR动态止损 + Buy Climax退出 | 风险控制体系建立 |
 | V6.2 | 行业RS排名 + 动量过滤 | 行业轮动识别 |
 | V6.3 | VWAP/ATR微观止跌确认 | 信号精度提升 |
-| **V6.4** | **4维度入场质量评分(0-8分)** | **信号质量量化** |
+| V6.4 | 4维度入场质量评分(0-8分) | 信号质量量化 |
+| **V6.4.7** | **多层止损参数寻优 + OAMV双数据源** | **回测总收益+777% → +1389%** |
 
-## 核心特性
+## 核心技术
 
 <table>
   <tr>
@@ -47,41 +59,134 @@
       <p>J值深度(0-2) + 量能枯竭(0-2) + 盘面形态(0-2) + 均线结构(0-2)，综合评分≥4分才推送</p>
     </td>
     <td align="center" width="50%">
+      <h3>📊 5层退出体系</h3>
+      <p>硬止损 + 保本止损 + 吊灯止盈 + <b>档位止盈(P1新增)</b> + 时间止损，逐层锁定利润</p>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
       <h3>🌡️ OAMV市场择时</h3>
       <p>基于活跃市值(OAMV)滞后阈值系统，日线+周线双重确认，自动切换牛市/熊市模式</p>
+    </td>
+    <td align="center">
+      <h3>🛡️ 急跌保护机制</h3>
+      <p>全市场5日累计跌幅中位数 &lt; -5% 时强制暂停买入3天，弥补OAMV滞后性</p>
     </td>
   </tr>
   <tr>
     <td align="center">
       <h3>🏭 行业动量轮动</h3>
-      <p>实时追踪100+行业板块相对强度(RS)，只在行业RS排名前20%的强势行业中选股</p>
+      <p>实时追踪122+行业板块相对强度(RS)，只在行业RS排名前20%的强势行业中选股</p>
     </td>
     <td align="center">
       <h3>⚡ DuckDB列式缓存</h3>
-      <p>股票日线数据DuckDB增量缓存，首次全量拉取后仅获取增量，扫描效率提升10倍</p>
+      <p>4864只股票日线数据DuckDB增量缓存，前复权数据，扫描效率提升10倍</p>
     </td>
   </tr>
   <tr>
     <td align="center">
-      <h3>📡 多通道推送</h3>
-      <p>Server酱(微信) + 微信公众号群发双通道，支持定时投递，确保消息准时到达</p>
+      <h3>🔧 eltdx二进制协议</h3>
+      <p>通达信7709端口二进制协议数据源，绕过HTTP限流，全量更新仅需数分钟</p>
     </td>
     <td align="center">
-      <h3>🔄 多数据源降级</h3>
-      <p>akshare → tushare → mootdx 三级降级机制，保障数据获取稳定性</p>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <h3>📊 订阅服务后端</h3>
-      <p>Supabase 用户管理 + 订阅墙中间件 + 推送日志 + 运营统计，支持订阅变现</p>
-    </td>
-    <td align="center">
-      <h3>🐳 容器化部署</h3>
-      <p>Docker + docker-compose 一键部署，支持 VPS / 腾讯云长期稳定运行</p>
+      <h3>🌐 OAMV双数据源</h3>
+      <p>支持tushare与DuckDB成交额代理双数据源，含单位跳变自动修复算法</p>
     </td>
   </tr>
 </table>
+
+## 回测验证
+
+### 5年全市场回测（2021-01-01 ~ 2026-07-02）
+
+| 参数 | 配置 |
+|------|------|
+| 回测期间 | 2021-01-01 ~ 2026-07-02（5.5年） |
+| 股票样本 | 全市场4864只A股（DuckDB前复权缓存） |
+| 交易规则 | T+1限价单买入，次日成交 |
+| 数据源 | eltdx通达信二进制协议 |
+| 回测引擎 | StatefulTradeBacktester_V64 状态机 |
+
+### 三轮参数寻优结果
+
+| 指标 | V6.4基线 | P0调优 | **V6.4.7最终** |
+|------|---------|--------|---------------|
+| **总交易数** | 988笔 | 974笔 | 869笔 |
+| **胜率** | 29.80% | 32.60% | **55.00%** |
+| **平均收益/笔** | +1.31% | +1.38% | **+1.60%** |
+| **盈亏比** | 3.67 | 3.07 | 1.34 |
+| **总收益** | +1295.50% | +1346.04% | **+1388.83%** |
+| 最大回撤年份 | 2022: -59.67% | 2022: -107.16% | 2022: -104.26% |
+
+### 按年份分解（V6.4.7最终版）
+
+| 年份 | 交易数 | 胜率 | 平均收益 | 总收益 |
+|------|--------|------|---------|--------|
+| 2021 | 224 | 61.2% | +2.98% | +666.65% |
+| 2022 | 87 | 44.8% | -1.20% | -104.26% |
+| 2023 | 122 | 52.5% | +0.89% | +108.83% |
+| 2024 | 115 | 73.9% | +5.73% | +658.72% |
+| 2025 | 238 | 47.1% | +0.07% | +15.89% |
+| 2026 | 183 | 56.0% | +0.24% | +43.00% |
+
+### 退出原因分布
+
+| 退出原因 | 笔数 | 占比 | 平均收益 | 说明 |
+|---------|------|------|---------|------|
+| 档位止盈 | 495 | 57.0% | +6.01% | P1新增：浮盈档位回撤锁利 |
+| 时间止损 | 306 | 35.2% | -5.28% | 持仓超时未达预期 |
+| 吊灯止盈 | 39 | 4.5% | +5.29% | 趋势跟踪退出 |
+| 硬止损 | 21 | 2.4% | -14.75% | ATR动态硬止损 |
+| 抢购高潮 | 8 | 0.9% | +16.54% | Buy Climax反转退出 |
+
+### OAMV牛熊分解
+
+| 市场状态 | 交易数 | 胜率 | 平均收益 | 说明 |
+|---------|--------|------|---------|------|
+| 牛市（允许买入） | 791 | 55.6% | +1.91% | OAMV判定为牛市 |
+| 熊市（禁止买入） | 78 | 48.7% | -1.61% | OAMV判定为熊市 |
+
+> 回测基于历史数据，不代表未来收益。投资有风险，入市需谨慎。
+
+## 参数寻优体系
+
+### P0：止损参数基础调优
+
+针对"5-10%浮盈档位利润回吐严重"问题，调整两个核心参数：
+
+| 参数 | 原值 | P0调优 | 效果 |
+|------|------|--------|------|
+| `breakeven_trigger_pct` | 0.02 | **0.05** | 浮盈5%才激活保本，减少过早扫出 |
+| `chandelier_atr_mult` | 3.0 | **2.8** | 吊灯线贴近最高点，捕获更多趋势 |
+
+**验证结果**：保本止损笔数减半（469→222笔），亏损减少343pp。
+
+### P1：档位止盈 + 急跌保护
+
+针对"浮盈后回撤到亏损"和"急跌月集中亏损"问题：
+
+**P1-1 浮盈档位止盈**（新增退出机制）：
+
+| 浮盈档位 | 允许回撤 | 说明 |
+|---------|---------|------|
+| 5-10% | 3% | 低档紧：拯救中段利润 |
+| 10-20% | 8% | 中档松：给趋势空间 |
+| 20%+ | 15% | 高档松：让大赢家跑，吊灯接管 |
+
+**P1-2 急跌保护**：
+
+全市场5日累计涨跌幅中位数 < -5% 时，强制暂停买入3天。回测期间触发104次，有效过滤2024-02千股跌停等极端行情。
+
+**验证结果**：保本止损清零（222→0笔），胜率32.6%→55.0%，总收益+1346%→+1389%。
+
+### 寻优方法论
+
+本研究采用 **"诊断 → 假设 → 验证 → 迭代"** 闭环：
+
+1. **诊断**：逐笔交易分析，定位利润回吐来源（按浮盈区间、退出原因、月份分解）
+2. **假设**：基于诊断结果提出参数调整假设（如"提高breakeven触发阈值可减少中段回吐"）
+3. **验证**：全市场5年回测A/B对比，确保调整在多数年份有效
+4. **迭代**：若副作用过大（如P0紧版2022年-192%），回调参数到中间值
 
 ## 系统架构
 
@@ -92,122 +197,26 @@ graph TD
     B --> D[行业动量分析]
     C --> E{市场环境判断}
     D --> E
-    E -->|牛市/熊市| F[全市场扫描 ~4862只]
-    E -->|观望| G[仅输出市场报告]
-    F --> H[批量预筛选]
-    H --> I[V6.4信号检测]
-    I --> J[入场质量评分≥4]
-    J --> K[动态评分过滤]
-    K --> L[信号详情分析]
-    L --> M[消息构建]
-    G --> M
-    M --> N[Server酱推送]
-    M --> O[微信公众号群发]
-    N --> P[📱 管理员微信]
-    O --> Q[📱 订阅用户微信]
-    O --> R[(Supabase 推送日志)]
-```
-
-## 订阅服务架构
-
-```mermaid
-graph LR
-    subgraph 扫描计算层
-        A[GitHub Actions / Docker] --> B[daily_push.py]
-        B --> C[信号数据]
-    end
-    subgraph 推送网关层
-        C -->|HTTP POST| D[腾讯云函数 / Docker]
-        D --> E[push_handler]
-        E --> F[生成图文HTML]
-        F --> G[上传素材]
-        G --> H[群发推文]
-    end
-    subgraph 数据层
-        D --> I[(Supabase)]
-        I --> J[users 用户表]
-        I --> K[push_logs 推送日志]
-        I --> L[subscription_events 订阅事件]
-        I --> M[metrics 监控指标]
-    end
-    subgraph 用户层
-        H --> N[📱 订阅用户]
-        O[微信关注/取关] -->|回调| P[wechat_handler]
-        P --> I
-    end
-```
-
-**订阅计划**：
-
-| 计划 | 价格 | 信号推送 | 有效期 |
-|------|------|---------|--------|
-| 免费试用 | ¥0 | ✅ | 7天 |
-| 月度订阅 | ¥29/月 | ✅ | 30天 |
-| 季度订阅 | ¥79/季 | ✅ | 90天（省8元） |
-| 年度订阅 | ¥199/年 | ✅ | 365天（省149元） |
-
-详见 [订阅服务设计文档](docs/specs/2026-06-16-wechat-subscription-design.md) 和 [Supabase Schema](docs/schema.sql)。
-
-## 推送时间
-
-| 时段 | 触发时间(UTC) | 扫描完成(北京) | 到达微信(北京) | 说明 |
-|------|-------------|---------------|---------------|------|
-| 盘中推送 | 05:30 | ~13:50 | **14:15** | 盘中实时信号 |
-| 盘后推送 | 09:30 | ~17:50 | **18:15** | 收盘完整分析 |
-
-> 采用 GitHub Actions 提前触发 + Server酱定时投递双保险机制，确保消息准时到达微信
-
-## 目录结构
-
-```
-├── .github/
-│   ├── workflows/
-│   │   ├── daily_push.yml      # CI/CD: 每日定时推送（错峰+备用+重试+告警）
-│   │   ├── tests.yml           # CI: 单元测试（多版本Python）
-│   │   ├── codeql.yml          # CI: 代码安全扫描
-│   │   └── keepalive.yml       # 防止60天不活动自动禁用
-│   ├── dependabot.yml          # 依赖自动更新
-│   └── ISSUE_TEMPLATE/         # Issue 模板
-├── classic_ta/                 # 核心策略模块
-│   ├── daily_push.py           # 统一推送入口
-│   ├── v64_ambush_model.py     # V6.4策略模型（入场质量评分）
-│   ├── v63_ambush_model.py     # V6.3策略模型（微观确认）
-│   ├── v62_ambush_model.py     # V6.2策略模型（行业动量）
-│   ├── v61_ambush_model.py     # V6.1策略模型（风险控制）
-│   ├── v60_ambush_model.py     # V6.0基础框架
-│   ├── stock_data_duckdb.py    # DuckDB数据缓存引擎
-│   └── common/                 # 公共模块
-│       ├── scanner.py          # 同步/异步扫描器
-│       ├── stock_pool.py       # 股票池+预筛选
-│       ├── signal_analyzer.py  # 信号详情分析
-│       ├── oamv_status.py      # OAMV择时状态
-│       ├── industry_analysis.py# 行业分析
-│       ├── push_channels.py    # 推送通道(Server酱)
-│       └── message_builder.py  # 消息构建
-├── ml_strategy/                # 机器学习策略
-│   ├── oamv_filter.py          # OAMV滞后阈值择时
-│   └── market_amv_cache.py     # 全市场活跃市值缓存
-├── wechat_push/                # 微信公众号推送 + 订阅服务
-│   ├── __init__.py             # 群发核心
-│   ├── cloud_function.py       # 腾讯云函数入口（4个handler）
-│   ├── subscription.py         # 订阅墙中间件 + 计划管理
-│   └── monitoring.py           # 推送日志 + 监控埋点 + 运营报表
-├── tests/                      # 单元测试（70+ tests）
-├── docs/
-│   ├── deploy.md               # 部署指南
-│   ├── schema.sql              # Supabase 数据库 Schema
-│   └── specs/                  # 设计文档
-├── Dockerfile                  # 容器化构建
-├── docker-compose.yml          # 全栈编排
-├── pyproject.toml              # 项目元数据 + 工具配置
-├── trigger_push.py             # 手动触发推送
-├── requirements.txt
-└── .env.example                # 环境变量模板
+    E -->|牛市/熊市| F[急跌保护过滤]
+    F --> G[全市场扫描 ~4864只]
+    E -->|观望| H[仅输出市场报告]
+    G --> I[批量预筛选]
+    I --> J[V6.4信号检测]
+    J --> K[入场质量评分≥4]
+    K --> L[动态评分过滤]
+    L --> M[信号详情分析]
+    M --> N[消息构建]
+    H --> N
+    N --> O[Server酱推送]
+    N --> P[微信公众号群发]
+    O --> Q[📱 管理员微信]
+    P --> R[📱 订阅用户微信]
+    P --> S[(Supabase 推送日志)]
 ```
 
 ## 快速开始
 
-### 方式一：GitHub Actions（零成本）
+### 方式一：GitHub Actions（零成本部署）
 
 #### 1. Fork 本仓库
 
@@ -221,19 +230,6 @@ graph LR
 |-----------|------|---------|
 | `TUSHARE_TOKEN` | Tushare API Token | [注册获取](https://tushare.pro/register) |
 | `SERVERCHAN_KEY` | Server酱推送Key（管理员） | [注册获取](https://sct.ftqq.com/) |
-| `SERVERCHAN_KEY_BETA` | Server酱推送Key（内测组） | 同上，第二个Key |
-
-可选（微信公众号订阅服务）：
-
-| Secret名称 | 说明 |
-|-----------|------|
-| `WECHAT_APP_ID` | 微信公众号AppID |
-| `WECHAT_APP_SECRET` | 微信公众号AppSecret |
-| `WECHAT_TOKEN` | 微信公众号Token |
-| `WECHAT_ENCODING_AES_KEY` | 微信公众号消息加解密Key |
-| `SUPABASE_URL` | Supabase项目URL |
-| `SUPABASE_KEY` | Supabase服务端Key（service_role） |
-| `PUSH_API_KEY` | 推送接口认证Key（自定义） |
 
 #### 3. 启用 Actions
 
@@ -248,18 +244,11 @@ Fork 后默认 Actions 是禁用的，进入 **Actions** 标签页，点击 **I 
 ### 方式二：Docker 部署（订阅服务推荐）
 
 ```bash
-# 克隆仓库
 git clone https://github.com/Lishoulan/lianghua.git
 cd lianghua
-
-# 配置环境变量
 cp .env.example .env
 # 编辑 .env 填入 API Keys
-
-# 一键启动（扫描服务 + 推送网关）
 docker-compose up -d
-
-# 查看日志
 docker-compose logs -f
 ```
 
@@ -268,14 +257,9 @@ docker-compose logs -f
 ### 本地运行
 
 ```bash
-# 克隆仓库
 git clone https://github.com/Lishoulan/lianghua.git
 cd lianghua
-
-# 安装依赖
 pip install -r requirements.txt
-
-# 配置环境变量
 cp .env.example .env
 # 编辑 .env 填入 TUSHARE_TOKEN 和 SERVERCHAN_KEY
 
@@ -284,9 +268,6 @@ python classic_ta/daily_push.py
 
 # Dry run（不推送，仅输出结果）
 python classic_ta/daily_push.py --dry-run
-
-# 手动触发GitHub Actions
-python trigger_push.py
 ```
 
 ## 技术栈
@@ -294,76 +275,52 @@ python trigger_push.py
 | 类别 | 技术 |
 |------|------|
 | 语言 | Python 3.10+ |
-| 数据源 | akshare / tushare / mootdx（三级降级） |
-| 数据缓存 | DuckDB（列式存储） |
+| 数据源 | eltdx（通达信二进制协议）/ akshare / tushare（三级降级） |
+| 数据缓存 | DuckDB（列式存储，前复权） |
 | 数据处理 | Pandas / NumPy |
-| 技术指标 | 自研（KDJ、ATR、VWAP、量价分析） |
+| 技术指标 | 自研（KDJ、ATR、VWAP、量价分析、OAMV） |
 | 自动化部署 | GitHub Actions / Docker / docker-compose |
 | 消息推送 | Server酱 + 微信公众号 |
 | 用户管理 | Supabase（PostgreSQL + RLS） |
-| 推送网关 | 腾讯云函数 / Docker HTTP 服务 |
 | 代码质量 | Ruff / pytest / CodeQL / mypy |
-
-## 回测表现
-
-全市场4862只股票 × 5年（2021-2026）回测结果：
-
-| 指标 | 数值 |
-|------|------|
-| 总交易数 | 173笔 |
-| 胜率 | 42.8% |
-| 盈亏比 | 2.71 |
-| 平均收益 | +4.50% |
-| 总收益 | +777.80% |
-| 信号日均 | 3.36个 |
-
-> 回测基于历史数据，不代表未来收益。投资有风险，入市需谨慎。
 
 ## 性能
 
 | 指标 | 首次运行 | 缓存命中 |
 |------|---------|---------|
-| 全市场扫描（4862只） | ~15 min | ~3 min |
+| 全市场扫描（4864只） | ~15 min | ~3 min |
 | OAMV 择时计算 | ~30s | ~1s（缓存） |
+| 5年全市场回测 | ~11 min | - |
 | GitHub Actions 总耗时 | ~20 min | ~5 min |
+
+## 项目文档
+
+- [CODE_WIKI.md](CODE_WIKI.md) — 项目架构和模块详解
+- [CHANGELOG.md](CHANGELOG.md) — 变更日志
+- [CONTRIBUTING.md](CONTRIBUTING.md) — 贡献指南
+- [docs/deploy.md](docs/deploy.md) — 部署指南
+
+## 路线图
+
+- [x] V6.4 入场质量评分系统
+- [x] V6.4.7 多层止损参数寻优（P0/P1）
+- [x] OAMV双数据源（tushare + eltdx）
+- [x] 急跌保护机制
+- [x] 微信公众号图文群发
+- [x] Docker 容器化部署
+- [ ] V7.0 机器学习因子增强
+- [ ] Web 研究仪表盘（参数寻优可视化）
+- [ ] 实时盘中信号（WebSocket 推送）
 
 ## 开发
 
 ### 运行测试
 
 ```bash
-# 安装开发依赖
 pip install -r requirements.txt pytest pytest-cov ruff
-
-# 运行全部测试
 python -m pytest tests/ -v
-
-# 带覆盖率
-python -m pytest tests/ -v --cov=classic_ta --cov-report=term-missing
-
-# 代码风格检查
 ruff check classic_ta/ ml_strategy/ wechat_push/ tests/
 ```
-
-### 项目文档
-
-- [CODE_WIKI.md](CODE_WIKI.md) — 项目架构和模块详解
-- [CHANGELOG.md](CHANGELOG.md) — 变更日志
-- [CONTRIBUTING.md](CONTRIBUTING.md) — 贡献指南
-- [docs/deploy.md](docs/deploy.md) — 部署指南
-- [docs/schema.sql](docs/schema.sql) — 数据库 Schema
-
-## 路线图
-
-- [x] V6.4 入场质量评分系统
-- [x] 微信公众号图文群发
-- [x] Supabase 用户管理 + 订阅墙
-- [x] Docker 容器化部署
-- [x] CI/CD 全流程（测试 + 安全扫描 + 告警）
-- [ ] V7.0 机器学习因子增强
-- [ ] 微信支付集成（订阅自动续费）
-- [ ] Web 仪表盘（订阅管理 + 信号回测）
-- [ ] 实时盘中信号（WebSocket 推送）
 
 ## FAQ
 
@@ -383,38 +340,17 @@ ruff check classic_ta/ ml_strategy/ wechat_push/ tests/
 GitHub Actions 定时任务在高峰期可能延迟 5-30 分钟。解决方案：
 1. 已通过错峰触发（非整点）缓解
 2. 已配置备用触发（主触发后15分钟兜底）
-3. 如需精确定时，建议迁移到 Docker + VPS 部署（见 [部署指南](docs/deploy.md)）
+3. 如需精确定时，建议迁移到 Docker + VPS 部署
 
 </details>
 
 <details>
 <summary><b>数据源拉取失败怎么办？</b></summary>
 
-系统已内置三级降级：akshare → tushare → mootdx。如全部失败：
+系统已内置三级降级：eltdx → akshare → tushare。如全部失败：
 1. 检查 `TUSHARE_TOKEN` 是否有效
 2. 检查网络连通性
 3. 查看日志确认具体错误
-
-</details>
-
-<details>
-<summary><b>如何从 GitHub Actions 迁移到 Docker？</b></summary>
-
-参考 [部署指南](docs/deploy.md) 的"方式二：Docker + VPS"章节。核心步骤：
-1. 准备 VPS（2核2G即可）
-2. 安装 Docker
-3. 配置 `.env`
-4. `docker-compose up -d`
-
-</details>
-
-<details>
-<summary><b>订阅服务如何变现？</b></summary>
-
-参考 [订阅服务设计文档](docs/specs/2026-06-16-wechat-subscription-design.md) 的变现路径：
-1. 阶段1：群发完整内容，积累用户
-2. 阶段2：群发摘要 + 详情页订阅墙
-3. 阶段3：升级认证服务号 + 微信支付
 
 </details>
 
@@ -424,13 +360,13 @@ GitHub Actions 定时任务在高峰期可能延迟 5-30 分钟。解决方案�
 
 ## 免责声明
 
-本项目仅供学习和研究使用，不构成任何投资建议。量化交易存在风险，使用者需自行承担一切后果。请遵守当地法律法规，理性投资。
+本项目仅供学习和研究使用，不构成任何投资建议。量化交易存在风险，使用者需自行承担一切后果。请遵守当地法律法规，理性投资。回测基于历史数据，不代表未来收益。
 
 ---
 
 <div align="center">
 
-**量化潜伏系统** · 威科夫量价理论 + VPA量价分析
+**量化潜伏系统** · 威科夫量价理论 + VPA量价分析 + 5年回测验证
 
 如果这个项目对你有帮助，请给一个 ⭐ Star
 
