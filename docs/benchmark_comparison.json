@@ -1,0 +1,22 @@
+{
+  "strategy": {
+    "total_return_pct": 1388.83,
+    "annual_return_pct": 63.4,
+    "win_rate_pct": 55.01,
+    "avg_profit_per_trade_pct": 1.6,
+    "total_trades": 869,
+    "max_drawdown_pct": -269.55
+  },
+  "benchmark_上证指数": {
+    "total_return_pct": 15.01,
+    "annual_return_pct": 2.58,
+    "win_rate_pct": null,
+    "avg_profit_per_trade_pct": null,
+    "total_trades": null,
+    "max_drawdown_pct": null
+  },
+  "alpha": {
+    "excess_return_pct": 1373.82,
+    "excess_annual_pct": 60.82
+  }
+}

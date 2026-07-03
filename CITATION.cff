@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+title: "量化潜伏系统: A股威科夫量价分析研究框架"
+message: "If you use this software or build upon the research methodology described herein, please cite it as below."
+type: software
+authors:
+  - alias: Lishoulan
+    website: "https://github.com/Lishoulan"
+repository-code: "https://github.com/Lishoulan/lianghua"
+url: "https://github.com/Lishoulan/lianghua"
+abstract: >-
+  一个面向A股全市场的量化研究框架，融合威科夫量价理论与VPA量价分析，
+  构建从信号检测、多层止损到市场择时的完整研究闭环。系统通过5年全市场回测
+  (4864只股票 × 2021-2026)系统性验证，累计收益+1389% vs 上证指数+15%，
+  并形成"诊断-假设-验证-迭代"参数寻优方法论。核心包括4维度入场质量评分、
+  5层退出体系(含档位止盈)、OAMV市场择时(双数据源)、急跌保护、行业动量轮动，
+  以及eltdx二进制协议数据源与DuckDB列式缓存。
+keywords:
+  - quantitative-trading
+  - a-share
+  - backtest
+  - wyckoff-method
+  - vpa
+  - volume-price-analysis
+  - market-timing
+  - duckdb
+  - python
+license: MIT
+version: "6.4.7"
+date-released: "2026-07-02"
+preferred-citation:
+  type: software
+  title: "量化潜伏系统: A股威科夫量价分析研究框架"
+  authors:
+    - alias: Lishoulan
+  version: "6.4.7"
+  year: 2026
+  url: "https://github.com/Lishoulan/lianghua"
