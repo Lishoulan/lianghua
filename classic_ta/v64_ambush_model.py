@@ -1003,6 +1003,21 @@ def StatefulTradeBacktester_V64(
                   and pnl_pct < params.get("early_exit_min_profit_pct", 0.0)):
                 exit_reason = ExitReason.EARLY_EXIT
 
+            # 优先级3.9：浮盈档位止盈（P1：浮盈≥5%后回撤超阈值即锁利，避免利润回吐到保本）
+            elif (params.get("profit_tier_enabled", False)
+                  and position.max_profit_pct >= params.get("profit_tier_min_trigger", 0.05)):
+                # 回撤 = 最大浮盈 - 当前浮盈
+                drawdown = position.max_profit_pct - pnl_pct
+                # 按浮盈档位确定允许的最大回撤
+                if position.max_profit_pct >= 0.20:
+                    max_dd = params.get("profit_tier_dd_high", 0.10)      # 20%+: 最多回吐10%
+                elif position.max_profit_pct >= 0.10:
+                    max_dd = params.get("profit_tier_dd_mid", 0.06)       # 10-20%: 最多回吐6%
+                else:
+                    max_dd = params.get("profit_tier_dd_low", 0.03)       # 5-10%: 最多回吐3%
+                if drawdown >= max_dd:
+                    exit_reason = ExitReason.PROFIT_TIER
+
             # 优先级4：动态时间止损
             else:
                 _float_pct = ((current_price - position.entry_price) / position.entry_price) * 100

@@ -303,75 +303,98 @@ class SyncScanner:
         start_time = time.time()
         timed_out = False
 
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {}
+        def _handle_scan_result(ts_code, name, industry, result):
+            """处理单只股票的扫描结果，返回 False 表示应终止扫描（超时）"""
+            nonlocal processed, errors, cache_miss, timed_out
+            processed += 1
+
+            # 进度输出（每100只 + flush，确保GitHub Actions可见）
+            if processed % 100 == 0 or processed == total:
+                elapsed = time.time() - start_time
+                speed = processed / elapsed if elapsed > 0 else 0
+                eta = (total - processed) / speed if speed > 0 else 0
+                print(f"  📊 进度: {processed}/{total} ({processed/total*100:.0f}%) | "
+                      f"信号:{len(signals)} 缓存缺失:{cache_miss} 错误:{errors} | "
+                      f"速度:{speed:.0f}只/s | ETA:{eta:.0f}s | 已耗时:{elapsed:.0f}s", flush=True)
+
+            # 超时检查
+            if time.time() - start_time > scan_timeout_sec:
+                print(f"  ⚠️ 扫描超时({scan_timeout_sec//60}min)，已处理{processed}/{total}只，"
+                      f"提前终止（已发现{len(signals)}只信号）", flush=True)
+                timed_out = True
+                return False
+
+            try:
+                result_ts_code, result_name, result_industry, df = result
+            except Exception:
+                errors += 1
+                completed_set.add(ts_code)
+                return True
+
+            if df is None:
+                if result_ts_code:  # 缓存缺失（非异常）
+                    cache_miss += 1
+                else:
+                    errors += 1
+                completed_set.add(ts_code)
+                return True
+
+            all_signals_data[ts_code] = df
+            signal_info = _extract_signal_info(ts_code, name, industry, df, self.best_params)
+            if signal_info is not None:
+                # 行业过滤
+                if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
+                    try:
+                        signal_date = pd.Timestamp(signal_info["signal_date"])
+                        ind_val = industry_allow_matrix[industry].reindex([signal_date])
+                        if not ind_val.empty and not ind_val.iloc[0]:
+                            return True
+                    except Exception:
+                        pass
+
+                # OAMV日期过滤
+                if oamv_weekly_allowed_dates is not None:
+                    signal_date = pd.Timestamp(signal_info["signal_date"])
+                    if signal_date not in oamv_weekly_allowed_dates:
+                        return True
+
+                signals.append(signal_info)
+                print(f"  🎯 潜伏信号: {name}({ts_code}) [{industry}] "
+                      f"{signal_info['price']:.2f} J:{signal_info['J']:.1f} "
+                      f"量比:{signal_info['vol_ratio']:.2f} 评分:{signal_info['entry_quality_score']}", flush=True)
+            return True
+
+        # 单进程模式：避免 Windows DuckDB 文件锁导致多进程缓存缺失
+        # 通过环境变量 SCAN_SINGLE_PROCESS=1 或 max_workers<=1 触发
+        use_single_process = self.max_workers <= 1 or os.getenv("SCAN_SINGLE_PROCESS") == "1"
+
+        if use_single_process:
+            print(f"  🔍 扫描开始(单进程): {total}只股票 | "
+                  f"模式:{'盘中实时' if is_intraday else '盘后完整'} | "
+                  f"超时:{scan_timeout_sec//60}min", flush=True)
             for ts_code, name, industry in all_stocks:
                 rt_quote = realtime_quotes.get(ts_code) if is_intraday else None
-                future = executor.submit(_fetch_and_process_one, ts_code, name, industry,
-                                         self.best_params, rt_quote)
-                futures[future] = (ts_code, name, industry)
-
-            for future in as_completed(futures):
-                ts_code, name, industry = futures[future]
-                processed += 1
-
-                # 进度输出（每100只 + flush，确保GitHub Actions可见）
-                if processed % 100 == 0 or processed == total:
-                    elapsed = time.time() - start_time
-                    speed = processed / elapsed if elapsed > 0 else 0
-                    eta = (total - processed) / speed if speed > 0 else 0
-                    print(f"  📊 进度: {processed}/{total} ({processed/total*100:.0f}%) | "
-                          f"信号:{len(signals)} 缓存缺失:{cache_miss} 错误:{errors} | "
-                          f"速度:{speed:.0f}只/s | ETA:{eta:.0f}s | 已耗时:{elapsed:.0f}s", flush=True)
-
-                # 超时检查
-                if time.time() - start_time > scan_timeout_sec:
-                    print(f"  ⚠️ 扫描超时({scan_timeout_sec//60}min)，已处理{processed}/{total}只，"
-                          f"提前终止（已发现{len(signals)}只信号）", flush=True)
-                    timed_out = True
-                    # 取消尚未开始的futures
-                    for f in futures:
-                        f.cancel()
+                result = _fetch_and_process_one(ts_code, name, industry,
+                                                self.best_params, rt_quote)
+                if not _handle_scan_result(ts_code, name, industry, result):
                     break
+        else:
+            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {}
+                for ts_code, name, industry in all_stocks:
+                    rt_quote = realtime_quotes.get(ts_code) if is_intraday else None
+                    future = executor.submit(_fetch_and_process_one, ts_code, name, industry,
+                                             self.best_params, rt_quote)
+                    futures[future] = (ts_code, name, industry)
 
-                try:
-                    result_ts_code, result_name, result_industry, df = future.result(timeout=30)
-                except Exception:
-                    errors += 1
-                    completed_set.add(ts_code)
-                    continue
-
-                if df is None:
-                    if result_ts_code:  # 缓存缺失（非异常）
-                        cache_miss += 1
-                    else:
-                        errors += 1
-                    completed_set.add(ts_code)
-                    continue
-
-                all_signals_data[ts_code] = df
-                signal_info = _extract_signal_info(ts_code, name, industry, df, self.best_params)
-                if signal_info is not None:
-                    # 行业过滤
-                    if industry_allow_matrix is not None and industry and industry in industry_allow_matrix.columns:
-                        try:
-                            signal_date = pd.Timestamp(signal_info["signal_date"])
-                            ind_val = industry_allow_matrix[industry].reindex([signal_date])
-                            if not ind_val.empty and not ind_val.iloc[0]:
-                                continue
-                        except Exception:
-                            pass
-
-                    # OAMV日期过滤
-                    if oamv_weekly_allowed_dates is not None:
-                        signal_date = pd.Timestamp(signal_info["signal_date"])
-                        if signal_date not in oamv_weekly_allowed_dates:
-                            continue
-
-                    signals.append(signal_info)
-                    print(f"  🎯 潜伏信号: {name}({ts_code}) [{industry}] "
-                          f"{signal_info['price']:.2f} J:{signal_info['J']:.1f} "
-                          f"量比:{signal_info['vol_ratio']:.2f} 评分:{signal_info['entry_quality_score']}", flush=True)
+                for future in as_completed(futures):
+                    ts_code, name, industry = futures[future]
+                    result = future.result(timeout=30)
+                    if not _handle_scan_result(ts_code, name, industry, result):
+                        # 超时，取消尚未开始的futures
+                        for f in futures:
+                            f.cancel()
+                        break
 
         elapsed = time.time() - start_time
         timeout_note = " (超时截断)" if timed_out else ""

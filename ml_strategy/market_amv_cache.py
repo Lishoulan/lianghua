@@ -21,6 +21,14 @@ CACHE_FILE = CACHE_DIR / "market_amv_cache.csv"
 
 def _get_pro():
     import tushare as ts
+    from dotenv import load_dotenv
+    import os
+    # 显式加载 .env 中的 token
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(env_path, override=True)
+    token = os.getenv("TUSHARE_TOKEN")
+    if token and token != "your_tushare_token_here":
+        ts.set_token(token)
     return ts.pro_api()
 
 
@@ -174,6 +182,118 @@ def get_market_amv_series():
 
     df = _merge_amv_columns(df)
     return df['amv'].dropna()
+
+
+def get_market_amv_from_duckdb(start_date="20200101", end_date=None):
+    """从 DuckDB 缓存聚合全市场日成交额作为 OAMV 代理序列
+
+    原理: AMV = Σ(circ_mv × turnover_rate_f / 100)
+        其中 circ_mv = close × 流通股本, turnover_rate_f ≈ volume / 流通股本
+        故 AMV ≈ Σ(close × volume) = 全市场日成交额
+    OAMV 滤波器做 z-score 标准化, 绝对值不重要, 故成交额代理完全等价。
+
+    优势: 无需 tushare, 无限流; eltdx 缓存即前复权日线; 毫秒级查询。
+
+    数据修复: eltdx 数据源存在 volume 单位不一致问题 (部分股票/时段为"手",
+    另一些为"股", 差100倍)。通过检测 AMV 序列的日环比突变点 (>10倍) 并
+    缩放归一化, 使序列连续, 不受单位变化影响。
+
+    参数:
+        start_date: 起始日期 (YYYYMMDD), 默认 2020-01-01
+        end_date: 结束日期 (YYYYMMDD), 默认今天
+
+    返回:
+        pd.Series, 索引为 trade_date, 值为归一化后的全市场日成交额
+    """
+    try:
+        import duckdb
+        from classic_ta.stock_data_duckdb import DUCKDB_PATH
+        if not DUCKDB_PATH.exists():
+            logger.warning("DuckDB 缓存文件不存在, 无法获取 OAMV 代理序列")
+            return None
+
+        if end_date is None:
+            end_date = pd.Timestamp.now().strftime('%Y%m%d')
+
+        start_ts = pd.Timestamp(start_date).strftime('%Y-%m-%d')
+        end_ts = pd.Timestamp(end_date).strftime('%Y-%m-%d')
+
+        conn = duckdb.connect(str(DUCKDB_PATH), read_only=True)
+        rows = conn.execute("""
+            SELECT date, SUM(close * volume) AS amv
+            FROM daily_data
+            WHERE date BETWEEN ? AND ?
+              AND volume > 0 AND close IS NOT NULL
+            GROUP BY date
+            ORDER BY date
+        """, [start_ts, end_ts]).fetchall()
+        conn.close()
+
+        if not rows:
+            logger.warning("DuckDB 聚合结果为空")
+            return None
+
+        dates = [r[0] for r in rows]
+        amvs = [float(r[1]) for r in rows]
+        series = pd.Series(amvs, index=pd.to_datetime(dates), name='amv')
+
+        # ── 修复 volume 单位不一致 ──
+        # eltdx 数据源部分股票/时段 volume 单位为"股"而非"手"(差100倍),
+        # 导致 AMV 序列出现 10-100 倍的日环比跳变。检测并缩放归一化。
+        series = _normalize_amv_unit_jumps(series)
+
+        logger.info(f"DuckDB OAMV 代理序列: {len(series)}天, "
+                    f"{series.index[0].strftime('%Y-%m-%d')} ~ "
+                    f"{series.index[-1].strftime('%Y-%m-%d')}")
+        return series
+    except Exception as e:
+        logger.warning(f"DuckDB OAMV 代理序列获取失败: {e}")
+        return None
+
+
+def _normalize_amv_unit_jumps(series, jump_threshold=10.0):
+    """修复 AMV 序列中的单位跳变
+
+    检测日环比超过 jump_threshold 倍的突变点, 将突变后的序列缩放,
+    使其与突变前的水平一致。这样得到的序列连续, 不受 volume 单位变化影响。
+
+    参数:
+        series: pd.Series, AMV 时间序列
+        jump_threshold: 突变检测阈值 (日环比>10倍视为单位跳变)
+
+    返回:
+        pd.Series, 归一化后的连续序列
+    """
+    if len(series) < 3:
+        return series
+
+    values = series.values.astype(float).copy()
+    corrections = []
+
+    # 逐日检测环比跳变
+    for i in range(1, len(values)):
+        prev = values[i - 1]
+        curr = values[i]
+        if prev <= 0 or curr <= 0:
+            continue
+        ratio = curr / prev
+        if ratio > jump_threshold:
+            # 突然放大: 缩小后续数据
+            scale = 1.0 / ratio
+            values[i:] *= scale
+            corrections.append((series.index[i], ratio, 'down', scale))
+        elif ratio < 1.0 / jump_threshold:
+            # 突然缩小: 放大后续数据
+            scale = 1.0 / ratio
+            values[i:] *= scale
+            corrections.append((series.index[i], ratio, 'up', scale))
+
+    if corrections:
+        for date, ratio, direction, scale in corrections:
+            logger.info(f"AMV单位跳变修复: {date.strftime('%Y-%m-%d')} "
+                        f"ratio={ratio:.1f}x {direction} scale={scale:.4f}")
+
+    return pd.Series(values, index=series.index, name=series.name)
 
 
 def get_market_amv_series_for_backtest(start_date="20200101", end_date=None):

@@ -72,12 +72,19 @@ BEST_PARAMS.update({
     "time_stop_loss": 0.0,          # 0.01→0.0（只有浮亏才时间止损）
     "time_stop_days": 10,           # 7→10（给趋势更多时间）
     "max_hold_days": 15,            # 30→15（退出优化: 加速资金周转，胜率+4.4pp，总收益+188pp）
-    "chandelier_atr_mult": 3.0,     # 3.5→3.0（更紧的吊灯止盈）
-    "dynamic_chandelier_low": 2.5,  # 3.0→2.5
-    "dynamic_chandelier_mid": 3.0,  # 3.5→3.0
-    "dynamic_chandelier_high": 3.5, # 4.0→3.5
-    "breakeven_trigger_pct": 0.02,  # 0.03→0.02（更早激活保本）
+    "chandelier_atr_mult": 2.8,     # 3.0→2.8（方案A: 吊灯回调到中间值，回测验证总收益+1346%最优）
+    "dynamic_chandelier_low": 2.2,  # 2.5→2.2
+    "dynamic_chandelier_mid": 2.7,  # 3.0→2.7
+    "dynamic_chandelier_high": 3.2, # 3.5→3.2
+    "breakeven_trigger_pct": 0.05,  # 0.02→0.05（方案A: 浮盈5%才激活保本，减少5-10%浮盈档利润回吐）
     "breakeven_min_profit_pct": 0.003,  # 0.005→0.003
+    # P1-1: 浮盈档位止盈（回撤超阈值即锁利，避免5-10%浮盈档利润回吐到保本）
+    # 低档紧(拯救中段利润) + 高档松(保留大赢家让吊灯接管)
+    "profit_tier_enabled": True,
+    "profit_tier_min_trigger": 0.05,  # 浮盈≥5%激活
+    "profit_tier_dd_low": 0.03,       # 5-10%档: 最多回吐3%（核心拯救）
+    "profit_tier_dd_mid": 0.08,       # 10-20%档: 最多回吐8%（放宽, 给趋势空间）
+    "profit_tier_dd_high": 0.15,      # 20%+档: 最多回吐15%（大幅放宽, 让吊灯接管）
     # 个股动量过滤（甜蜜点: stock > -3%）
     "lag_filter_enabled": True,                # 启用个股动量过滤
     "lag_industry_strong_threshold": 0.02,     # (保留，仅展示用)

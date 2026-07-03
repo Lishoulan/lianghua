@@ -125,6 +125,7 @@ class ExitReason(Enum):
     BUY_CLIMAX = auto()          # 优先级3：Buy Climax
     VPA_DISTRIBUTION = auto()    # 优先级3.5：VPA派发信号
     EARLY_EXIT = auto()          # 优先级3.8：快速验证退出
+    PROFIT_TIER = auto()        # 优先级3.9：浮盈档位止盈（P1：回撤超阈值即锁利）
     TIME_STOP = auto()           # 优先级4：时间止损/超时平仓
 
     @property
@@ -136,6 +137,7 @@ class ExitReason(Enum):
             ExitReason.BUY_CLIMAX: "抢购高潮",
             ExitReason.VPA_DISTRIBUTION: "VPA派发",
             ExitReason.EARLY_EXIT: "快速止损",
+            ExitReason.PROFIT_TIER: "档位止盈",
             ExitReason.TIME_STOP: "时间止损",
         }[self]
 
