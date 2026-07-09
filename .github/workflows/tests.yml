@@ -32,7 +32,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov ruff
+          pip install pytest pytest-cov ruff duckdb
+
+      - name: Verify duckdb is available
+        run: |
+          python -c "import duckdb; print(f'duckdb {duckdb.__version__}')"
 
       - name: Lint with ruff
         run: ruff check classic_ta/ ml_strategy/ wechat_push/ tests/ || true
@@ -70,6 +74,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          python -c "import duckdb; print(f'duckdb {duckdb.__version__}')"
 
       - name: Verify imports
         run: |
