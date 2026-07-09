@@ -1,82 +1,133 @@
-"""
-股票池获取与预筛选模块
+"""Stock universe and intraday quote helpers."""
 
-从 v63_daily_push.py 提取的公共股票池逻辑。
-支持 akshare（优先，无限流）和 tushare（降级）两种数据源。
-"""
-import os
+from __future__ import annotations
+
 import logging
-import pandas as pd
+import os
 from datetime import datetime
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+COL_CODE = "\u4ee3\u7801"
+COL_NAME = "\u540d\u79f0"
+COL_INDUSTRY = "\u884c\u4e1a"
+COL_LAST = "\u6700\u65b0\u4ef7"
+COL_OPEN = "\u4eca\u5f00"
+COL_HIGH = "\u6700\u9ad8"
+COL_LOW = "\u6700\u4f4e"
+COL_PREV_CLOSE = "\u6628\u6536"
+COL_VOLUME = "\u6210\u4ea4\u91cf"
+COL_AMOUNT = "\u6210\u4ea4\u989d"
+COL_CHANGE_PCT = "\u6da8\u8dcc\u5e45"
+COL_TURNOVER = "\u6362\u624b\u7387"
+COL_VOL_RATIO = "\u91cf\u6bd4"
+
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _has_col(df: pd.DataFrame, column: str) -> bool:
+    return column in df.columns
+
+
+def _row_get(row, column: str, default=None):
+    if column in row.index:
+        return row[column]
+    return default
+
+
+def _to_ts_code(code: str) -> str | None:
+    code = str(code)
+    if code.startswith("6"):
+        return f"{code}.SH"
+    if code.startswith("0") or code.startswith("3"):
+        return f"{code}.SZ"
+    return None
+
+
+def _calc_intraday_qfq_ratio(df: pd.DataFrame, realtime_quote: dict, today: pd.Timestamp) -> float:
+    """Map raw realtime prices into the cached forward-adjusted price space."""
+    prev_close_raw = _to_float(realtime_quote.get("PrevClose"), 0.0)
+    if prev_close_raw <= 0 or df is None or len(df) == 0:
+        return 1.0
+
+    ref_idx = -1
+    if len(df) >= 2 and df.index[-1] == today:
+        ref_idx = -2
+
+    prev_close_adj = _to_float(df.iloc[ref_idx].get("Close"), 0.0)
+    if prev_close_adj <= 0:
+        return 1.0
+
+    return prev_close_adj / prev_close_raw
+
 
 def get_all_a_stocks():
-    """获取全市场A股列表
-
-    优先使用akshare（无限流），降级使用tushare。
-    排除ST、*ST、N开头、北交所（8/9开头）股票。
-
-    Returns:
-        list[tuple]: [(ts_code, name, industry), ...]
-    """
-    # 尝试 akshare
+    """Return all listed A-shares as ``(ts_code, name, industry)`` tuples."""
     try:
         import akshare as ak
+
         df = ak.stock_zh_a_spot_em()
         if df is not None and len(df) > 100:
             stocks = []
             for _, row in df.iterrows():
-                code = str(row.get("代码", ""))
-                name = str(row.get("名称", ""))
+                code = str(_row_get(row, COL_CODE, ""))
+                name = str(_row_get(row, COL_NAME, ""))
                 if not code or name.startswith("ST") or name.startswith("*ST") or name.startswith("N"):
                     continue
-                if code.startswith("6"):
-                    ts_code = f"{code}.SH"
-                elif code.startswith("0") or code.startswith("3"):
-                    ts_code = f"{code}.SZ"
-                else:
+                ts_code = _to_ts_code(code)
+                if ts_code is None:
                     continue
-                industry = str(row.get("行业", ""))
-                stocks.append((ts_code, name, industry))
+                stocks.append((ts_code, name, str(_row_get(row, COL_INDUSTRY, ""))))
             if len(stocks) > 100:
-                logger.info(f"akshare获取股票列表: {len(stocks)}只")
+                logger.info("akshare stock list fetched: %s", len(stocks))
                 return stocks
-    except Exception as e:
-        logger.warning(f"akshare获取股票列表失败: {e}")
+    except Exception as exc:
+        logger.warning("akshare stock list failed: %s", exc)
 
-    # 降级到tushare
     try:
         import tushare as ts
+
         token = os.getenv("TUSHARE_TOKEN")
         if not token:
             return _fallback_duckdb_stocks()
+
         pro = ts.pro_api(token)
-        stock_basic = pro.stock_basic(exchange="", list_status="L",
-                                       fields="ts_code,symbol,name,industry,list_date")
+        stock_basic = pro.stock_basic(
+            exchange="",
+            list_status="L",
+            fields="ts_code,symbol,name,industry,list_date",
+        )
         a_stocks = stock_basic[
-            (stock_basic["ts_code"].str.endswith(".SH"))
-            | (stock_basic["ts_code"].str.endswith(".SZ"))
+            stock_basic["ts_code"].str.endswith(".SH") | stock_basic["ts_code"].str.endswith(".SZ")
         ]
         a_stocks = a_stocks[~a_stocks["name"].str.startswith("ST")]
         a_stocks = a_stocks[~a_stocks["name"].str.startswith("*ST")]
         a_stocks = a_stocks[~a_stocks["name"].str.startswith("N")]
         a_stocks = a_stocks[a_stocks["list_date"] < "20250101"]
         return [(row["ts_code"], row["name"], row.get("industry", "")) for _, row in a_stocks.iterrows()]
-    except Exception as e:
-        logger.warning(f"获取股票列表失败: {e}")
+    except Exception as exc:
+        logger.warning("tushare stock list failed: %s", exc)
         return _fallback_duckdb_stocks()
 
 
 def _fallback_duckdb_stocks():
-    """DuckDB缓存回退：当akshare和tushare都不可用时，从缓存获取股票列表"""
+    """Fallback to the local DuckDB cache when online providers are unavailable."""
     try:
-        from classic_ta.stock_data_duckdb import DUCKDB_PATH
-        if not DUCKDB_PATH.exists():
-            logger.warning("DuckDB缓存文件不存在，无法回退")
-            return []
         import duckdb
+
+        from classic_ta.stock_data_duckdb import DUCKDB_PATH
+
+        if not DUCKDB_PATH.exists():
+            logger.warning("DuckDB cache file does not exist")
+            return []
+
         conn = duckdb.connect(str(DUCKDB_PATH), read_only=True)
         result = conn.execute(
             "SELECT DISTINCT ts_code FROM daily_data "
@@ -84,162 +135,133 @@ def _fallback_duckdb_stocks():
             "ORDER BY ts_code"
         ).fetchall()
         conn.close()
+
         stocks = []
         for (ts_code,) in result:
-            code = ts_code.split('.')[0]
-            if code.startswith('8') or code.startswith('9'):
+            code = ts_code.split(".")[0]
+            if code.startswith("8") or code.startswith("9"):
                 continue
-            if code.startswith('6'):
-                exchange = 'SH'
-            elif code.startswith('0') or code.startswith('3'):
-                exchange = 'SZ'
-            else:
+            if _to_ts_code(code) is None:
                 continue
             stocks.append((ts_code, code, ""))
-        logger.info(f"DuckDB缓存回退: 获取{len(stocks)}只股票")
-        print(f"  ⚠️ 在线数据源不可用，使用DuckDB缓存({len(stocks)}只股票)", flush=True)
+
+        logger.info("DuckDB fallback stock list fetched: %s", len(stocks))
+        print(f"  Using DuckDB stock cache fallback ({len(stocks)} symbols)", flush=True)
         return stocks
-    except Exception as e:
-        logger.warning(f"DuckDB缓存回退失败: {e}")
+    except Exception as exc:
+        logger.warning("DuckDB fallback failed: %s", exc)
         return []
 
 
 def batch_prefilter_stocks():
-    """用akshare批量获取全市场实时行情，快速预筛选潜在信号股
-
-    预筛选规则：
-      - 排除ST、北交所、停牌、退市
-      - 价格 >= 3元（仅排除低价股，无上限）
-
-    Returns:
-        pd.DataFrame or None: 预筛选后的行情数据（含ts_code列）
-    """
+    """Prefilter the spot universe using batch realtime quotes."""
     try:
         import akshare as ak
-        print("  📡 正在获取akshare全市场行情（预筛选）...", flush=True)
+
+        print("  Fetching akshare spot quotes for prefilter...", flush=True)
         df = ak.stock_zh_a_spot_em()
         if df is None or len(df) == 0:
-            print("  ⚠️ akshare返回空数据", flush=True)
+            print("  akshare returned empty spot data", flush=True)
             return None
-        print(f"  📡 获取到{len(df)}只股票行情", flush=True)
+        print(f"  Retrieved {len(df)} spot rows", flush=True)
 
-        # 基本过滤
-        df = df[~df["名称"].str.startswith("ST", na=False)]
-        df = df[~df["名称"].str.startswith("*ST", na=False)]
-        df = df[~df["名称"].str.startswith("N", na=False)]
-        df = df[~df["名称"].str.contains("退", na=False)]
-        if "成交量" in df.columns:
-            df = df[df["成交量"] > 0]
-        df = df[~df["代码"].str.startswith("8", na=False)]
-        df = df[~df["代码"].str.startswith("9", na=False)]
+        df = df[~df[COL_NAME].str.startswith("ST", na=False)]
+        df = df[~df[COL_NAME].str.startswith("*ST", na=False)]
+        df = df[~df[COL_NAME].str.startswith("N", na=False)]
+        df = df[~df[COL_NAME].str.contains("\u9000", na=False)]
+        if _has_col(df, COL_VOLUME):
+            df = df[df[COL_VOLUME] > 0]
+        df = df[~df[COL_CODE].str.startswith("8", na=False)]
+        df = df[~df[COL_CODE].str.startswith("9", na=False)]
 
-        # 转换为ts_code格式
-        def to_ts_code(code):
-            code = str(code)
-            if code.startswith("6"):
-                return f"{code}.SH"
-            elif code.startswith("0") or code.startswith("3"):
-                return f"{code}.SZ"
-            return None
-
-        df["ts_code"] = df["代码"].apply(to_ts_code)
+        df["ts_code"] = df[COL_CODE].apply(_to_ts_code)
         df = df[df["ts_code"].notna()]
 
-        if "最新价" in df.columns:
-            df = df[df["最新价"] >= 3]  # 仅排除低价股，不设上限（覆盖科创板高价股）
+        if _has_col(df, COL_LAST):
+            df = df[df[COL_LAST] >= 3]
 
-        logger.info(f"批量预筛选: {len(df)}只（排除ST/停牌/北交所/退市/低价股）")
-        print(f"  ✅ 预筛选完成: {len(df)}只通过初筛", flush=True)
+        logger.info("Batch prefilter passed: %s", len(df))
+        print(f"  Prefilter complete: {len(df)} symbols", flush=True)
         return df
-    except Exception as e:
-        logger.warning(f"批量预筛选失败: {e}")
-        print(f"  ❌ 预筛选失败: {e}", flush=True)
+    except Exception as exc:
+        logger.warning("Batch prefilter failed: %s", exc)
+        print(f"  Prefilter failed: {exc}", flush=True)
         return None
 
 
 def get_realtime_quotes():
-    """获取全市场实时行情（akshare）
-
-    Returns:
-        dict: {ts_code: {Open, High, Low, Close, Volume, Amount, change_pct, turnover, vol_ratio_rt}}
-    """
+    """Return realtime quotes keyed by ts_code."""
     try:
         import akshare as ak
+
         df = ak.stock_zh_a_spot_em()
         if df is None or len(df) == 0:
             return {}
 
         quotes = {}
         for _, row in df.iterrows():
-            code = str(row.get("代码", ""))
-            if code.startswith("6"):
-                ts_code = f"{code}.SH"
-            elif code.startswith("0") or code.startswith("3"):
-                ts_code = f"{code}.SZ"
-            else:
+            code = str(_row_get(row, COL_CODE, ""))
+            ts_code = _to_ts_code(code)
+            if ts_code is None:
                 continue
 
-            try:
-                close = float(row.get("最新价", 0))
-                if close <= 0:
-                    continue
-                quotes[ts_code] = {
-                    "Open": float(row.get("今开", 0)),
-                    "High": float(row.get("最高", 0)),
-                    "Low": float(row.get("最低", 0)),
-                    "Close": close,
-                    "Volume": float(row.get("成交量", 0)),
-                    "Amount": float(row.get("成交额", 0)),
-                    "change_pct": float(row.get("涨跌幅", 0)),
-                    "turnover": float(row.get("换手率", 0)),
-                    "vol_ratio_rt": float(row.get("量比", 0)) if row.get("量比", 0) else 0,
-                }
-            except (ValueError, TypeError):
+            close = _to_float(_row_get(row, COL_LAST, 0))
+            if close <= 0:
                 continue
 
-        logger.info(f"实时行情获取: {len(quotes)}只")
+            quotes[ts_code] = {
+                "Open": _to_float(_row_get(row, COL_OPEN, 0)),
+                "High": _to_float(_row_get(row, COL_HIGH, 0)),
+                "Low": _to_float(_row_get(row, COL_LOW, 0)),
+                "Close": close,
+                "PrevClose": _to_float(_row_get(row, COL_PREV_CLOSE, 0)),
+                "Volume": _to_float(_row_get(row, COL_VOLUME, 0)),
+                "Amount": _to_float(_row_get(row, COL_AMOUNT, 0)),
+                "change_pct": _to_float(_row_get(row, COL_CHANGE_PCT, 0)),
+                "turnover": _to_float(_row_get(row, COL_TURNOVER, 0)),
+                "vol_ratio_rt": _to_float(_row_get(row, COL_VOL_RATIO, 0)),
+            }
+
+        logger.info("Realtime quotes fetched: %s", len(quotes))
         return quotes
-    except Exception as e:
-        logger.warning(f"实时行情获取失败: {e}")
+    except Exception as exc:
+        logger.warning("Realtime quotes failed: %s", exc)
         return {}
 
 
 def append_realtime_bar(df, realtime_quote, today_str=None):
-    """将akshare实时行情拼接到日线数据末尾
-
-    Args:
-        df: 已计算指标的DataFrame
-        realtime_quote: {Open, High, Low, Close, Volume, Amount, ...}
-        today_str: 今日日期字符串
-
-    Returns:
-        pd.DataFrame: 拼接后的DataFrame
-    """
+    """Append or overwrite today's bar using qfq-mapped realtime prices."""
     if not realtime_quote or realtime_quote.get("Close", 0) <= 0:
         return df
 
     try:
         today = pd.Timestamp(today_str or datetime.now().strftime("%Y-%m-%d"))
+        ratio = _calc_intraday_qfq_ratio(df, realtime_quote, today)
+        open_adj = realtime_quote["Open"] * ratio
+        high_adj = realtime_quote["High"] * ratio
+        low_adj = realtime_quote["Low"] * ratio
+        close_adj = realtime_quote["Close"] * ratio
 
         if len(df) > 0 and df.index[-1] == today:
-            df.iloc[-1]["Open"] = realtime_quote["Open"]
-            df.iloc[-1]["High"] = realtime_quote["High"]
-            df.iloc[-1]["Low"] = realtime_quote["Low"]
-            df.iloc[-1]["Close"] = realtime_quote["Close"]
-            df.iloc[-1]["Volume"] = realtime_quote["Volume"]
-            df.iloc[-1]["Amount"] = realtime_quote["Amount"]
+            df.loc[today, "Open"] = open_adj
+            df.loc[today, "High"] = high_adj
+            df.loc[today, "Low"] = low_adj
+            df.loc[today, "Close"] = close_adj
+            df.loc[today, "Volume"] = realtime_quote["Volume"]
+            df.loc[today, "Amount"] = realtime_quote["Amount"]
             return df
 
-        new_row = pd.Series({
-            "Open": realtime_quote["Open"],
-            "High": realtime_quote["High"],
-            "Low": realtime_quote["Low"],
-            "Close": realtime_quote["Close"],
-            "Volume": realtime_quote["Volume"],
-            "Amount": realtime_quote["Amount"],
-        }, name=today)
-
-        df = pd.concat([df, new_row.to_frame().T])
-        return df
-    except Exception as e:
+        new_row = pd.Series(
+            {
+                "Open": open_adj,
+                "High": high_adj,
+                "Low": low_adj,
+                "Close": close_adj,
+                "Volume": realtime_quote["Volume"],
+                "Amount": realtime_quote["Amount"],
+            },
+            name=today,
+        )
+        return pd.concat([df, new_row.to_frame().T])
+    except Exception:
         return df
