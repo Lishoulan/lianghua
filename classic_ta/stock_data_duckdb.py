@@ -304,8 +304,7 @@ def _save_to_duckdb(ts_code: str, df: pd.DataFrame):
             # 关闭当前线程的读连接（read_only=True 与 read_only=False 不能共存）
             close_thread_local_conns()
 
-            import duckdb
-            conn = duckdb.connect(str(DUCKDB_PATH), read_only=False)
+            conn = _get_duckdb_conn()
             try:
                 # 删除该股票的旧数据
                 conn.execute("DELETE FROM daily_data WHERE ts_code = ?", [ts_code])
