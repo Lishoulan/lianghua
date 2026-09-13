@@ -1,7 +1,7 @@
-tushare>=1.2.89
-akshare>=1.12.0
+tushare>=1.4.29
+akshare>=1.18.88
 efinance>=0.5.5
-mootdx>=0.5.8
+mootdx>=0.11.7
 baostock>=0.8.9
 pandas>=1.5.0
 numpy>=1.23.0
