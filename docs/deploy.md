@@ -7,6 +7,7 @@
 | 方式 | 成本 | 稳定性 | 运维 | 适用场景 |
 |------|------|--------|------|---------|
 | GitHub Actions | 免费 | 中（受平台调度影响） | 零运维 | 个人使用、MVP |
+| Cloudflare Worker + Actions | 免费 | 高（外部定时器，秒级触发） | 低 | 需要准时推送 |
 | Docker + VPS | 低（~$5/月） | 高 | 中 | 订阅服务、长期运行 |
 | 腾讯云函数 | 按量计费 | 高 | 低 | 微信回调、推送网关 |
 | docker-compose 全栈 | 低 | 高 | 中 | 一体化部署 |
@@ -19,8 +20,27 @@
 
 **限制**：
 - 60 天不活动会自动禁用（已通过 `keepalive.yml` 解决）
-- 定时触发可能延迟 5-30 分钟（已通过错峰触发缓解）
+- 定时触发可能延迟 5-30 分钟（已通过错峰触发缓解；需要准时推送见下节）
 - 公开仓库免费 2000 分钟/月，私有仓库有限额
+
+---
+
+## 方式一·补：Cloudflare Worker 精准定时（免费，解决"推送不准时"）
+
+GitHub 的 `schedule` 事件由平台排队，高峰会延迟 5-30 分钟。用 Cloudflare Cron
+（外部定时器，精度到分钟）准时敲一下 GitHub 的 `workflow_dispatch` 接口，
+由 GitHub 立刻开始跑工作流，绕开平台排队。
+
+GitHub 自己的 `schedule` 保留作兜底，工作流内的 `concurrency` + artifact 去重
+保证不会重复推送。
+
+完整部署与排错步骤见 [`deploy/cloudflare-scheduler/README.md`](../deploy/cloudflare-scheduler/README.md)，要点：
+
+1. Worker 变量：`GITHUB_OWNER` / `GITHUB_REPO` / `WORKFLOW_FILE` / `GITHUB_REF`
+2. Worker 密钥：`GH_TOKEN`（fine-grained PAT 需 **Actions: Read and write**，classic 需 **repo** scope）、`TRIGGER_TOKEN`
+3. Cron Trigger（**UTC**）：`15 5 * * 1-5`（13:15 北京）、`15 9 * * 1-5`（17:15 北京）
+4. 打开 Worker 的 Observability 日志，否则定时触发失败没有任何痕迹
+5. 自检：`GET /health` 看变量与 GitHub 连通性，`POST /trigger?token=<TRIGGER_TOKEN>` 立刻验证整条链路
 
 ---
 

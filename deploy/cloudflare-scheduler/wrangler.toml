@@ -1,0 +1,34 @@
+# Cloudflare Worker 配置（lianghua 定时触发器）
+#
+# Worker 名必须与 Dashboard 里已存在的那个一致（当前是 lianhua，
+# 对应 https://lianhua.573183877.workers.dev/）。
+# 名字写错的话 `wrangler deploy` 会新建另一个 Worker，
+# 结果就是两个 Worker 各自带一条 cron → 重复触发。
+name = "lianhua"
+main = "src/index.js"
+compatibility_date = "2026-10-21"
+workers_dev = true
+
+# Workers Logs：Dashboard → lianhua → Logs 可见
+# （wrangler 版本过旧报错的话，删掉这一段即可，不影响功能）
+[observability]
+enabled = true
+
+[vars]
+GITHUB_OWNER = "xihaoxiao"
+GITHUB_REPO = "lianghua"
+WORKFLOW_FILE = "daily_push.yml"
+GITHUB_REF = "main"
+
+# Secrets 不能写在这里（会明文进仓库），用命令设置：
+#   npx wrangler secret put GH_TOKEN        # GitHub PAT
+#   npx wrangler secret put TRIGGER_TOKEN   # 随机串，保护 /trigger 端点
+#
+# GH_TOKEN 权限要求：
+#   fine-grained PAT → Repository permissions → Actions: Read and write
+#   classic PAT      → 勾选 repo scope
+
+# Cloudflare cron 用 UTC：05:15 / 09:15 UTC = 13:15 / 17:15 北京时间
+# GitHub 自带的 6 个 schedule 保留作兜底（concurrency group + artifact 去重防重复推送）
+[triggers]
+crons = ["15 5 * * 1-5", "15 9 * * 1-5"]

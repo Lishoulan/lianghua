@@ -1,0 +1,18 @@
+{
+  "name": "lianghua-cloudflare-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker that triggers the lianghua daily_push GitHub Actions workflow on a precise cron",
+  "scripts": {
+    "test": "node --test test/",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail",
+    "secret:token": "wrangler secret put GH_TOKEN",
+    "secret:trigger": "wrangler secret put TRIGGER_TOKEN"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

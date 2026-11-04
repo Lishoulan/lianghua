@@ -32,6 +32,9 @@ jobs:
       should_run: ${{ steps.check.outputs.should_run }}
       time_slot: ${{ steps.check.outputs.time_slot }}
     steps:
+      # 需要仓库里的 scripts/has_push_artifact.sh（去重查找要翻页）
+      - uses: actions/checkout@v4
+
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,8 +58,10 @@ jobs:
             # 盘中: 09:15-15:00 (BJ) = 01:15-07:00 (UTC)
             # 盘后: 15:00-23:59 (BJ) = 07:00-15:59 (UTC)
             # 盘前: 00:00-09:15 (BJ) = 16:00-01:15 (UTC) -> 视为 after_hours（用上一交易日数据）
-            UTC_HOUR=$(date -u +%H)
-            UTC_MIN=$(date -u +%M)
+            # 注意 10# 前缀：date 输出带前导零（如 08/09），bash 会当八进制解析并报错，
+            # 导致算术错误中止整个分支、SLOT 为空，下游 --mode 缺参数直接失败。
+            UTC_HOUR=$((10#$(date -u +%H)))
+            UTC_MIN=$((10#$(date -u +%M)))
             UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
 
             if [ "$UTC_MIN_TOTAL" -ge 75 ] && [ "$UTC_MIN_TOTAL" -lt 420 ]; then
@@ -72,10 +77,15 @@ jobs:
 
           TODAY=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')
           ARTIFACT_NAME="push-results-${TODAY}-${SLOT}"
+          # 翻页查找（脚本内含原因说明）：gh api 默认只返回第一页 30 条，
+          # 而仓库里每次 CI 都会产生 coverage-* / *.dockerbuild 等无关 artifact，
+          # 一天就能把首页挤满 → 今天的 artifact 查不到 → 去重失效 → 重复推送。
+          if [ ! -f scripts/has_push_artifact.sh ]; then
+            echo "::error::缺少 scripts/has_push_artifact.sh —— check-duplicate job 必须先 checkout 仓库"
+            exit 1
+          fi
           ARTIFACTS=$(
-            gh api "repos/${{ github.repository }}/actions/artifacts" \
-              --jq ".artifacts[] | select(.name == \"${ARTIFACT_NAME}\") | .id" \
-              2>/dev/null || true
+            bash scripts/has_push_artifact.sh "${{ github.repository }}" "${ARTIFACT_NAME}"
           )
 
           if [ -n "$ARTIFACTS" ]; then
@@ -95,6 +105,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate time slot
+        env:
+          TIME_SLOT: ${{ needs.check-duplicate.outputs.time_slot }}
+        run: |
+          if [ -z "$TIME_SLOT" ] || [ "$TIME_SLOT" = "unknown" ]; then
+            echo "::error::time_slot 无效（值='$TIME_SLOT'），拒绝继续执行推送。"
+            exit 1
+          fi
+          echo "time_slot = $TIME_SLOT"
+
       - name: Log trigger time and detect delay
         id: trigger_info
         env:
@@ -106,8 +126,9 @@ jobs:
           echo "Time slot: ${{ needs.check-duplicate.outputs.time_slot }}"
           echo "Schedule expression: ${SCHEDULE_EXPR:-manual}"
 
-          UTC_HOUR=$(date -u +%H)
-          UTC_MIN=$(date -u +%M)
+          # 同样需要 10# 前缀，避免 08/09 被当八进制
+          UTC_HOUR=$((10#$(date -u +%H)))
+          UTC_MIN=$((10#$(date -u +%M)))
           UTC_MIN_TOTAL=$((UTC_HOUR * 60 + UTC_MIN))
 
           SLOT="${{ needs.check-duplicate.outputs.time_slot }}"
@@ -153,6 +174,16 @@ jobs:
             stock-cache-v6-${{ runner.os }}-
             stock-cache-v5-${{ runner.os }}-
             stock-cache-v4-${{ runner.os }}-
+
+      - name: Bootstrap DuckDB cache (only on cache miss)
+        run: |
+          mkdir -p results
+          if [ ! -s results/stock_cache.duckdb ]; then
+            echo "DuckDB cache missing; downloading seed..."
+            python3 -u scripts/bootstrap_cache_seed.py
+          else
+            echo "DuckDB cache present; skip seed download."
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -210,7 +241,9 @@ jobs:
             /bin/sh -lc "$CMD"
 
       - name: Upload results
-        if: always()
+        if: always() && env.DRY_RUN != 'true'
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         uses: actions/upload-artifact@v4
         with:
           name: push-results-${{ steps.date.outputs.today }}-${{ needs.check-duplicate.outputs.time_slot }}
@@ -253,6 +286,16 @@ jobs:
             stock-cache-v6-${{ runner.os }}-
             stock-cache-v5-${{ runner.os }}-
             stock-cache-v4-${{ runner.os }}-
+
+      - name: Bootstrap DuckDB cache (only on cache miss)
+        run: |
+          mkdir -p results
+          if [ ! -s results/stock_cache.duckdb ]; then
+            echo "DuckDB cache missing; downloading seed..."
+            python3 -u scripts/bootstrap_cache_seed.py
+          else
+            echo "DuckDB cache present; skip seed download."
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -306,7 +349,9 @@ jobs:
             /bin/sh -lc "$CMD"
 
       - name: Upload retry results
-        if: success()
+        if: success() && env.DRY_RUN != 'true'
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         uses: actions/upload-artifact@v4
         with:
           name: push-results-${{ steps.date.outputs.today }}-${{ needs.check-duplicate.outputs.time_slot }}
@@ -323,52 +368,57 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const date = new Date().toISOString().slice(0, 10);
-            const slot = '${{ needs.check-duplicate.outputs.time_slot }}';
-            const slotLabel = slot === 'intraday' ? 'intraday' : slot === 'after_hours' ? 'after-hours' : 'unknown';
-            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            try {
+              const date = new Date().toISOString().slice(0, 10);
+              const slot = '${{ needs.check-duplicate.outputs.time_slot }}';
+              const slotLabel = slot === 'intraday' ? 'intraday' : slot === 'after_hours' ? 'after-hours' : 'unknown';
+              const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
-            const issues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'push-failure,auto-alert',
-              per_page: 50,
-            });
-
-            const existing = issues.data.find((issue) =>
-              issue.title.includes(date) && issue.title.includes(slotLabel)
-            );
-
-            const body = [
-              '## Daily push failure alert',
-              '',
-              `- Date: ${date}`,
-              `- Time slot: ${slotLabel} (${slot})`,
-              `- Run URL: ${runUrl}`,
-              '',
-              'Suggested checks:',
-              '1. Review the workflow logs for the exact exception.',
-              '2. Verify required GitHub Secrets such as TUSHARE_TOKEN and SERVERCHAN_KEY.',
-              '3. Confirm the Docker image built successfully and the container could start.',
-              '4. If this looks transient, trigger workflow_dispatch to retry manually.',
-            ].join('\n');
-
-            if (existing) {
-              await github.rest.issues.createComment({
+              const issues = await github.rest.issues.listForRepo({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: existing.number,
-                body: `Repeated failure detected.\n\n${body}`,
+                state: 'open',
+                labels: 'push-failure,auto-alert',
+                per_page: 50,
               });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: `[Daily Push Failure] ${date} ${slotLabel}`,
-                body,
-                labels: ['push-failure', 'auto-alert'],
-              });
+
+              const existing = issues.data.find((issue) =>
+                issue.title.includes(date) && issue.title.includes(slotLabel)
+              );
+
+              const body = [
+                '## Daily push failure alert',
+                '',
+                `- Date: ${date}`,
+                `- Time slot: ${slotLabel} (${slot})`,
+                `- Run URL: ${runUrl}`,
+                '',
+                'Suggested checks:',
+                '1. Review the workflow logs for the exact exception.',
+                '2. Verify required GitHub Secrets such as TUSHARE_TOKEN and SERVERCHAN_KEY.',
+                '3. Confirm the Docker image built successfully and the container could start.',
+                '4. If this looks transient, trigger workflow_dispatch to retry manually.',
+              ].join('\n');
+
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body: `Repeated failure detected.\n\n${body}`,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `[Daily Push Failure] ${date} ${slotLabel}`,
+                  body,
+                  labels: ['push-failure', 'auto-alert'],
+                });
+              }
+            } catch (error) {
+              // 仓库关闭了 Issues 时这里必然报错；告警失败不应掩盖真正的推送失败原因
+              core.warning(`创建告警 Issue 失败（已忽略）：${error.message}`);
             }
 
   close-alerts-on-success:
@@ -380,26 +430,31 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            const issues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'push-failure,auto-alert',
-              per_page: 20,
-            });
-
-            for (const issue of issues.data) {
-              await github.rest.issues.createComment({
+            try {
+              const issues = await github.rest.issues.listForRepo({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: issue.number,
-                body: 'Daily push recovered successfully. Closing this auto alert.',
+                state: 'open',
+                labels: 'push-failure,auto-alert',
+                per_page: 20,
               });
 
-              await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issue.number,
-                state: 'closed',
-              });
+              for (const issue of issues.data) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: 'Daily push recovered successfully. Closing this auto alert.',
+                });
+
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+              }
+            } catch (error) {
+              // 仓库关闭了 Issues 时这里必然报错；告警清理失败不应把成功的推送标记成失败
+              core.warning(`关闭告警 Issue 失败（已忽略）：${error.message}`);
             }

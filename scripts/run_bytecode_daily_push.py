@@ -195,7 +195,7 @@ def safe_prewarm_data() -> dict[str, bool]:
     return {"realtime": realtime_ok, "cache_ready": cache_ready}
 
 
-def run_daily_push() -> None:
+def run_daily_push(mode: str | None = None, dry_run: bool = False) -> None:
     _load_env_file(ENV_FILE)
     _disable_broken_dotenv()
     _install_import_hook()
@@ -207,7 +207,10 @@ def run_daily_push() -> None:
     if not callable(entrypoint):
         raise RuntimeError("classic_ta.daily_push does not expose a callable daily_push()")
 
-    entrypoint()
+    if mode is None and not dry_run:
+        entrypoint()
+    else:
+        entrypoint(mode, dry_run)
 
 
 def load_daily_push_module():

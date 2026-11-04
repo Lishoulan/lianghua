@@ -1,0 +1,6 @@
+.wrangler/
+node_modules/
+.dev.vars
+.env
+.cf.env
+secrets.json

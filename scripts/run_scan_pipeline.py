@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import traceback
@@ -16,6 +17,11 @@ from scripts.fetch_today_bars import fetch_today_bars
 from scripts.run_bytecode_daily_push import refresh_reference_cache, run_daily_push, run_prewarm
 
 
+def _parse_dry_run(value: str | None) -> bool:
+    """DRY_RUN 环境变量 → 干跑标记。"""
+    return str(value or "").strip().lower() in ("1", "true", "yes")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prewarm data, validate freshness, then run the current daily push.")
     parser.add_argument("--mode", choices=["intraday", "after_hours"], required=True)
@@ -24,6 +30,10 @@ def main() -> None:
     args = parser.parse_args()
 
     current_mode = args.mode
+    # 工作流通过环境变量传 DRY_RUN（此前它只是传了个没人读的环境变量，干跑照样真推送）
+    dry_run = _parse_dry_run(os.getenv("DRY_RUN"))
+    if dry_run:
+        print("[pipeline] DRY-RUN 模式：只扫描不推送")
     last_error: Exception | None = None
     for attempt in range(1, args.retries + 1):
         print(f"[pipeline] attempt {attempt}/{args.retries} mode={current_mode}")
@@ -45,9 +55,9 @@ def main() -> None:
             expected, latest = ensure_freshness(current_mode)
             print(f"[pipeline] freshness_ok latest={latest} expected={expected}")
 
-            # 5. 执行推送
+            # 5. 执行推送（把当前生效的时段传下去，容器不再自己看钟判断）
             print("[pipeline] run daily push")
-            run_daily_push()
+            run_daily_push(mode=current_mode, dry_run=dry_run)
             print("[pipeline] success")
             return
         except Exception as exc:

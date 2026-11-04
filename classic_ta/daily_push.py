@@ -20,6 +20,8 @@
 推送渠道：Server酱（管理员组+内测组）+ 微信公众号群发（盘后）
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -218,15 +220,16 @@ def prewarm_data():
     tushare_ok = False
 
     try:
-        import akshare as ak
-        df = ak.stock_zh_a_spot_em()
+        from classic_ta.common.stock_pool import _get_spot_df_cached
+
+        df = _get_spot_df_cached()
         if df is not None and len(df) > 100:
             akshare_ok = True
-            print(f"  ✅ akshare实时行情: 可用 ({len(df)}只)", flush=True)
+            print(f"  ✅ 实时行情源: 可用 ({len(df)}只)", flush=True)
         else:
-            print("  ❌ akshare实时行情: 数据异常", flush=True)
+            print("  ❌ 实时行情源: 数据异常", flush=True)
     except Exception as e:
-        print(f"  ❌ akshare实时行情: 不可用 ({e})", flush=True)
+        print(f"  ❌ 实时行情源: 不可用 ({e})", flush=True)
 
     try:
         import tushare as ts
@@ -263,7 +266,103 @@ def prewarm_data():
 #  主流程
 # ══════════════════════════════════════════════════════════
 
-def daily_push():
+def _resolve_intraday(mode: str | None, now: datetime) -> bool:
+    """决定是否盘中模式。
+
+    优先用调用方（工作流 / pipeline）指定的 mode：工作流已按触发时间算好时段，
+    容器启动晚了几分钟也不该改判（例如 13:15 触发、15:05 才开跑，
+    按墙上时钟会误判成盘后，导致中午收到盘后推送）。
+    没指定时才退回按北京时间窗口（9:00-15:00）判断。
+    """
+    if mode in ("intraday", "after_hours"):
+        return mode == "intraday"
+    return 9 <= now.hour < 15
+
+
+def _run_pushes(*, admin_title, admin_desp, beta_title, beta_desp, scheduled_time,
+                dry_run, is_intraday, degraded, oamv_status, signals, industry_stats):
+    """执行所有推送通道。
+
+    dry_run=True 时只打印标题与长度，绝不调用任何真实推送接口。
+    公众号群发只在盘后（且未降级）时发。
+    """
+    print("\n" + "=" * 60, flush=True)
+    print("📤 Server酱推送", flush=True)
+    print("=" * 60, flush=True)
+
+    if scheduled_time:
+        print(f"  📅 定时投递目标: {scheduled_time}（北京时间）", flush=True)
+        print(f"  💡 扫描完成时间: {datetime.now(_BJT).strftime('%H:%M:%S')}，消息将在目标时间准时投递到微信", flush=True)
+    else:
+        print(f"  ⚡ 立即发送（已过目标投递时间）", flush=True)
+
+    push_results = {"admin": False, "beta": False}
+    if dry_run:
+        print("\n🧪 [DRY-RUN] 跳过 Server酱推送", flush=True)
+        print(f"  管理员组标题: {admin_title}", flush=True)
+        print(f"  内测组标题: {beta_title}", flush=True)
+        print(f"  管理员组内容长度: {len(admin_desp)} 字", flush=True)
+        print(f"  内测组内容长度: {len(beta_desp)} 字", flush=True)
+    else:
+        try:
+            push_results = send_group_push(admin_title, admin_desp, beta_title, beta_desp, scheduled=scheduled_time)
+        except Exception as e:
+            print(f"  ❌ 推送异常（非致命，继续后续流程）: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+
+    # 推送结果校验
+    admin_ok = push_results.get("admin", False)
+    beta_ok = push_results.get("beta", False)
+    print(f"\n📊 推送结果: 管理员组={'✅成功' if admin_ok else '❌失败'} | 内测组={'✅成功' if beta_ok else '❌失败'}", flush=True)
+
+    if not admin_ok and not beta_ok and not dry_run:
+        print("⚠️ 所有推送通道均失败！请检查 SERVERCHAN_KEY 配置和网络连接", flush=True)
+        print("  提示: GitHub Actions 的 retry-push job 将自动重试", flush=True)
+
+    # ══════════════════════════════════════════════════════════
+    #  公众号群发（仅盘后模式；盘中降级的运行也不算盘后，不发）
+    # ══════════════════════════════════════════════════════════
+    if dry_run:
+        print("\n🧪 [DRY-RUN] 跳过公众号群发", flush=True)
+    elif not is_intraday and not degraded:
+        print("\n" + "=" * 60, flush=True)
+        print("📢 公众号群发（盘后）", flush=True)
+        print("=" * 60, flush=True)
+        try:
+            from wechat_push import push_signals_to_wechat
+            wechat_result = push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=False)
+            wechat_ok = wechat_result.get("success", False)
+            skipped = wechat_result.get("skipped", False)
+            if skipped:
+                print(f"  ⏭️ 公众号群发: 已跳过（今日已成功群发，幂等保护生效）", flush=True)
+            elif wechat_ok:
+                print(f"  ✅ 公众号群发: 成功", flush=True)
+            else:
+                print(f"  ❌ 公众号群发: 失败 - {wechat_result.get('error', '未知')}", flush=True)
+        except Exception as e:
+            print(f"  ❌ 公众号群发异常（非致命）: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+    elif degraded:
+        print("\n📢 盘中降级运行，跳过公众号群发（仅盘后群发）", flush=True)
+    else:
+        print("\n📢 盘中模式，跳过公众号群发（仅盘后群发）", flush=True)
+
+    return push_results
+
+
+def daily_push(mode: str | None = None, dry_run: bool = False):
+    """执行一次每日推送。
+
+    Args:
+        mode: "intraday" / "after_hours"。由调用方（工作流 / pipeline）指定的时段。
+              传 None 时按本机北京时间判断（9:00-15:00 为盘中）。
+              优先用传入值：工作流已经根据触发时间算好了时段，
+              若容器启动较晚（比如 13:15 触发但排队到 15:05 才跑），
+              再按墙上时钟判断会把盘中误判成盘后。
+        dry_run: True 时只扫描、只打印，绝不真的推送。
+    """
     import time as _time
     _push_start = _time.time()
 
@@ -313,7 +412,10 @@ def daily_push():
 
     # 0.5 判断盘中/盘后模式
     now = datetime.now(_BJT)
-    is_intraday = 9 <= now.hour < 15
+    if mode in ("intraday", "after_hours"):
+        print(f"  时段来源: 调用方指定 --mode={mode}", flush=True)
+    is_intraday = _resolve_intraday(mode, now)
+    degraded = False   # 盘中窗口内拿不到实时行情 → 降级为盘后数据（需在推送里标注）
     print(f"\n>>> {'盘中实时模式' if is_intraday else '盘后完整模式'} <<<", flush=True)
 
     # 1. OAMV活跃市值择时
@@ -346,13 +448,15 @@ def daily_push():
     _t = _time.time()
     realtime_quotes = None
     if is_intraday:
-        print("\n[3/6] 获取akshare实时行情（盘中拼接）...", flush=True)
+        print("\n[3/6] 获取实时行情（东财→新浪）...", flush=True)
         realtime_quotes = get_realtime_quotes()
         if realtime_quotes:
             print(f"  实时行情: {len(realtime_quotes)}只 → 将拼接为今日实时K线", flush=True)
         else:
-            print("  实时行情获取失败，回退到盘后模式", flush=True)
+            # 所有源都挂了：降级成盘后数据，但必须显式标注，不能假装是盘中推送
+            print("  ⚠️ 实时行情获取失败（所有数据源均不可用），本次降级为盘后数据", flush=True)
             is_intraday = False
+            degraded = True
     else:
         print("\n[3/6] 盘后模式，跳过实时行情获取", flush=True)
     _step_time("实时行情", _t)
@@ -482,14 +586,15 @@ def daily_push():
 
     # 构建推送消息（两组格式）
     print("\n构建推送消息...", flush=True)
-    admin_title, admin_desp = build_push_message(oamv_status, signals, industry_stats, BEST_PARAMS, is_intraday=is_intraday)
-    beta_title, beta_desp = build_beta_push_message(oamv_status, signals, industry_stats, BEST_PARAMS, is_intraday=is_intraday)
+    admin_title, admin_desp = build_push_message(oamv_status, signals, industry_stats, BEST_PARAMS, is_intraday=is_intraday, degraded=degraded)
+    beta_title, beta_desp = build_beta_push_message(oamv_status, signals, industry_stats, BEST_PARAMS, is_intraday=is_intraday, degraded=degraded)
 
     # 保存结果
     result = {
         "scan_time": datetime.now(_BJT).strftime("%Y-%m-%d %H:%M:%S"),
         "version": "V6.4-精细动态评分",
-        "mode": "盘中实时" if is_intraday else "盘后完整",
+        "mode": "盘中实时" if is_intraday else ("盘后完整(降级)" if degraded else "盘后完整"),
+        "degraded": degraded,
         "params": {
             "entry_quality_min_score": BEST_PARAMS["entry_quality_min_score"],
             "ambush_j_oversold": BEST_PARAMS["ambush_j_oversold"],
@@ -516,58 +621,20 @@ def daily_push():
     # ══════════════════════════════════════════════════════════
     #  Server酱推送（定时投递，确保准时到达微信）
     # ══════════════════════════════════════════════════════════
-    print("\n" + "=" * 60, flush=True)
-    print("📤 Server酱推送", flush=True)
-    print("=" * 60, flush=True)
-
     scheduled_time = _calc_scheduled_time(is_intraday)
-    if scheduled_time:
-        print(f"  📅 定时投递目标: {scheduled_time}（北京时间）", flush=True)
-        print(f"  💡 扫描完成时间: {datetime.now(_BJT).strftime('%H:%M:%S')}，消息将在目标时间准时投递到微信", flush=True)
-    else:
-        print(f"  ⚡ 立即发送（已过目标投递时间）", flush=True)
-
-    push_results = {"admin": False, "beta": False}
-    try:
-        push_results = send_group_push(admin_title, admin_desp, beta_title, beta_desp, scheduled=scheduled_time)
-    except Exception as e:
-        print(f"  ❌ 推送异常（非致命，继续后续流程）: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-
-    # 推送结果校验
-    admin_ok = push_results.get("admin", False)
-    beta_ok = push_results.get("beta", False)
-    print(f"\n📊 推送结果: 管理员组={'✅成功' if admin_ok else '❌失败'} | 内测组={'✅成功' if beta_ok else '❌失败'}", flush=True)
-
-    if not admin_ok and not beta_ok:
-        print("⚠️ 所有推送通道均失败！请检查 SERVERCHAN_KEY 配置和网络连接", flush=True)
-        print("  提示: GitHub Actions 的 retry-push job 将自动重试", flush=True)
-
-    # ══════════════════════════════════════════════════════════
-    #  公众号群发（仅盘后模式）
-    # ══════════════════════════════════════════════════════════
-    if not is_intraday:
-        print("\n" + "=" * 60, flush=True)
-        print("📢 公众号群发（盘后）", flush=True)
-        print("=" * 60, flush=True)
-        try:
-            from wechat_push import push_signals_to_wechat
-            wechat_result = push_signals_to_wechat(oamv_status, signals, industry_stats, is_intraday=False)
-            wechat_ok = wechat_result.get("success", False)
-            skipped = wechat_result.get("skipped", False)
-            if skipped:
-                print(f"  ⏭️ 公众号群发: 已跳过（今日已成功群发，幂等保护生效）", flush=True)
-            elif wechat_ok:
-                print(f"  ✅ 公众号群发: 成功", flush=True)
-            else:
-                print(f"  ❌ 公众号群发: 失败 - {wechat_result.get('error', '未知')}", flush=True)
-        except Exception as e:
-            print(f"  ❌ 公众号群发异常（非致命）: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-    else:
-        print("\n📢 盘中模式，跳过公众号群发（仅盘后群发）", flush=True)
+    push_results = _run_pushes(
+        admin_title=admin_title,
+        admin_desp=admin_desp,
+        beta_title=beta_title,
+        beta_desp=beta_desp,
+        scheduled_time=scheduled_time,
+        dry_run=dry_run,
+        is_intraday=is_intraday,
+        degraded=degraded,
+        oamv_status=oamv_status,
+        signals=signals,
+        industry_stats=industry_stats,
+    )
 
     # 摘要
     print(f"\n{'='*80}")

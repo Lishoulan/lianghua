@@ -395,7 +395,8 @@ ruff check classic_ta/ ml_strategy/ wechat_push/ tests/
 GitHub Actions 定时任务在高峰期可能延迟 5-30 分钟。解决方案：
 1. 已通过错峰触发（非整点）缓解
 2. 已配置备用触发（主触发后15分钟兜底）
-3. 如需精确定时，建议迁移到 Docker + VPS 部署
+3. 需要准时推送：部署 Cloudflare Worker 精准定时器（见 [deploy/cloudflare-scheduler](deploy/cloudflare-scheduler/README.md)），由外部 Cron 准时触发 `workflow_dispatch`
+4. 也可以迁移到 Docker + VPS 部署，完全自控时间
 
 </details>
 

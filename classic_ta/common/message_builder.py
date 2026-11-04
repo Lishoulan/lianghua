@@ -25,7 +25,7 @@ PRIORITY_TIER_RULES = {
 }
 
 
-def build_push_message(oamv_status, signals, industry_stats, best_params, is_intraday=False):
+def build_push_message(oamv_status, signals, industry_stats, best_params, is_intraday=False, degraded=False):
     """构建管理员组推送消息（完整技术版，Markdown格式）
 
     Args:
@@ -34,6 +34,7 @@ def build_push_message(oamv_status, signals, industry_stats, best_params, is_int
         industry_stats: 行业统计列表
         best_params: 策略参数
         is_intraday: 是否盘中模式
+        degraded: 是否为盘中窗口内拿不到实时行情而降级（标题/正文会显式标注）
 
     Returns:
         tuple: (title, desp)
@@ -51,6 +52,8 @@ def build_push_message(oamv_status, signals, industry_stats, best_params, is_int
         sentiment_icon = "⚪"
 
     mode_tag = "盘中实时" if is_intraday else "盘后完整"
+    if degraded:
+        mode_tag = "⚠️降级(实时行情不可用)"
     title = f"{sentiment_icon} 量化潜伏 {today} | {len(signals)}信号 | {sentiment} | {mode_tag}"
 
     lines = []
@@ -60,6 +63,8 @@ def build_push_message(oamv_status, signals, industry_stats, best_params, is_int
     lines.append(f"- 📅 {today} {weekday_cn} | {mode_tag}")
     if is_intraday:
         lines.append(f"- ⏰ 数据截至 {datetime.now().strftime('%H:%M')}（盘中实时）")
+    if degraded:
+        lines.append("- ⚠️ **盘中实时行情源不可用，本次推送使用上一交易日完整日线数据，请勿当作盘中实时信号对待**")
     lines.append(f"- 📊 潜伏信号: **{len(signals)}只** | 市场情绪: {sentiment_icon}**{sentiment}**")
 
     # 二、市场环境
@@ -176,7 +181,7 @@ def build_push_message(oamv_status, signals, industry_stats, best_params, is_int
     return title, desp
 
 
-def build_beta_push_message(oamv_status, signals, industry_stats, best_params, is_intraday=False):
+def build_beta_push_message(oamv_status, signals, industry_stats, best_params, is_intraday=False, degraded=False):
     """构建内测组推送消息（精简卡片式）
 
     Args:
@@ -198,6 +203,8 @@ def build_beta_push_message(oamv_status, signals, industry_stats, best_params, i
         sentiment_icon = "⚪"
 
     mode_tag = "盘中" if is_intraday else "盘后"
+    if degraded:
+        mode_tag = "⚠️降级"
     title = f"{sentiment_icon} 量化潜伏 {today} | {len(signals)}只 | {sentiment} | {mode_tag}"
 
     lines = []
